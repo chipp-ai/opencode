@@ -98,4 +98,22 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
   )
 })
 
+/** The most recent assistant message for a session, fully decoded (text/cost/tokens/finish/error), or `undefined` if none exists yet. */
+export const lastAssistant = Effect.fn("SessionHistory.lastAssistant")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  const row = yield* db
+    .select()
+    .from(SessionMessageTable)
+    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant")))
+    .orderBy(desc(SessionMessageTable.seq))
+    .limit(1)
+    .get()
+    .pipe(Effect.orDie)
+  if (!row) return undefined
+  const message = yield* decodeMessageRow(row)
+  return message.type === "assistant" ? message : undefined
+})
+
 export * as SessionHistory from "./history"
