@@ -27,6 +27,7 @@ import { SessionStore } from "@opencode/core/session/store"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import type { LocationServices } from "@opencode/core/location-services"
 import { Image } from "@opencode/core/image"
+import { Mcp } from "@opencode/core/mcp/index"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Snapshot } from "@opencode/core/snapshot"
@@ -77,6 +78,21 @@ const locations = makeGlobalNode({
             Layer.mock(Image.Service, {
               normalize: (_resource, content) =>
                 Effect.succeed(content.content.length > 5 * 1024 * 1024 ? { ...content, content: "AA==" } : content),
+            }),
+            Layer.mock(Mcp.Service, {
+              readResource: (input) =>
+                Effect.succeed(
+                  input.server === "docs" && input.uri === "docs://readme"
+                    ? Mcp.ResourceContent.make({
+                        server: "docs",
+                        uri: input.uri,
+                        contents: [
+                          { type: "text", uri: input.uri, text: "hello" },
+                          { type: "blob", uri: "docs://logo", blob: "iVBORw0KGgo=", mimeType: "image/png" },
+                        ],
+                      })
+                    : undefined,
+                ),
             }),
             Layer.mock(Snapshot.Service, {
               capture: () => Effect.undefined,
@@ -340,6 +356,64 @@ describe("Session.prompt", () => {
       const stored = yield* admitted(message.id)
       expect(stored?.type).toBe("user")
       if (stored?.type === "user") expect(stored.payload.files).toEqual(message.payload.files)
+    }),
+  )
+
+  it.effect("materializes MCP resources before admission", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const uri = Mcp.resourceUri({ server: "docs", uri: "docs://readme" })
+
+      const message = yield* session.prompt({
+        sessionID,
+        text: "Inspect @docs:Readme",
+        files: [
+          {
+            uri,
+            name: "Readme",
+            description: "Project documentation",
+            mention: { start: 8, end: 20, text: "@docs:Readme" },
+          },
+        ],
+        resume: false,
+      })
+
+      expect(message.payload.files).toEqual([
+        {
+          data: Buffer.from("hello").toString("base64"),
+          mime: "text/plain",
+          source: { type: "uri", uri },
+          name: "Readme",
+          description: "Project documentation",
+          mention: { start: 8, end: 20, text: "@docs:Readme" },
+        },
+        {
+          data: "iVBORw0KGgo=",
+          mime: "image/png",
+          source: { type: "uri", uri },
+          name: "Readme-2",
+          description: "Project documentation",
+        },
+      ])
+      expect((yield* admitted(message.id))?.type).toBe("user")
+    }),
+  )
+
+  it.effect("rejects unavailable MCP resource attachments", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const uri = Mcp.resourceUri({ server: "docs", uri: "docs://missing" })
+      const error = yield* session
+        .prompt({ sessionID, text: "Inspect this", files: [{ uri }], resume: false })
+        .pipe(Effect.flip)
+
+      expect(error).toMatchObject({
+        _tag: "Session.AttachmentError",
+        uri,
+        message: "Unable to read MCP resource: docs://missing",
+      })
     }),
   )
 

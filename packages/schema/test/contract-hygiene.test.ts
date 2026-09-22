@@ -176,6 +176,7 @@ describe("contract hygiene", () => {
       Form.Fields,
       Form.Info,
       Form.ExternalField,
+      Mcp.ResourceReference,
       Mcp.Resource,
       Mcp.ResourceTemplate,
       Mcp.ResourceCatalog,

@@ -39,6 +39,10 @@ export type ToolResult = McpClient.CallToolResult & { readonly server: ServerNam
 export type Prompt = McpClient.Prompt & { readonly server: ServerName }
 export type PromptResult = McpClient.GetPromptResult & { readonly server: ServerName; readonly name: string }
 
+export const ResourceReference = Mcp.ResourceReference
+export type ResourceReference = Mcp.ResourceReference
+export const resourceUri = Mcp.resourceUri
+export const parseResourceUri = Mcp.parseResourceUri
 export const Resource = Mcp.Resource
 export type Resource = Mcp.Resource
 export const ResourceTemplate = Mcp.ResourceTemplate

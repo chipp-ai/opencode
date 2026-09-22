@@ -11,6 +11,7 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { Image } from "../image.js"
 import { Instance } from "../instance/service.js"
+import { Mcp } from "../mcp/index.js"
 import { Mime } from "../mime.js"
 import { Plugin } from "../plugin/service.js"
 import { PluginHooks } from "../plugin/hooks.js"
@@ -51,7 +52,7 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
     })
     const input = event.prompt
     const files = input.files
-      ? yield* Effect.forEach(input.files, materializeAttachment, { concurrency: 8 })
+      ? (yield* Effect.forEach(input.files, materializeAttachment, { concurrency: 8 })).flat()
       : undefined
     const requested = input.skills
     const selected = yield* Effect.gen(function* () {
@@ -93,6 +94,51 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
 const materializeAttachment = Effect.fn("SessionPrompt.materializeAttachment")(function* (
   input: PromptInput.FileAttachment,
 ) {
+  const reference = Mcp.parseResourceUri(input.uri)
+  if (reference) {
+    const mcp = yield* Mcp.Service
+    const resource = yield* mcp.readResource(reference).pipe(
+      Effect.mapError(
+        (error) => new AttachmentError({ uri: input.uri, message: `Unable to read MCP resource: ${error.message}` }),
+      ),
+    )
+    if (!resource?.contents.length)
+      return yield* new AttachmentError({ uri: input.uri, message: `Unable to read MCP resource: ${reference.uri}` })
+    if (
+      resource.contents.length > MAX_MCP_ATTACHMENT_PARTS ||
+      resource.contents.reduce(
+        (total, part) => total + (part.type === "text" ? Buffer.byteLength(part.text) : base64ByteLength(part.blob)),
+        0,
+      ) > MAX_ATTACHMENT_BYTES
+    )
+      return yield* new AttachmentError({
+        uri: input.uri,
+        message: `MCP resource exceeds attachment limits: ${reference.uri}`,
+      })
+    return yield* Effect.forEach(resource.contents, (part, index) =>
+      Effect.gen(function* () {
+        const bytes = part.type === "text" ? Buffer.from(part.text) : yield* decodeMcpBlob(input.uri, part.blob)
+        return yield* createAttachment(
+          index === 0
+            ? input
+            : {
+                ...input,
+                name: `${input.name ?? part.uri}-${index + 1}`,
+                mention: undefined,
+              },
+          {
+            bytes,
+            source: { type: "uri", uri: input.uri },
+            start: undefined,
+            end: undefined,
+            name: undefined,
+            mime: part.type === "text" ? "text/plain" : undefined,
+          },
+        )
+      }),
+    )
+  }
+
   const label = attachmentLabel(input)
   const resolved = input.uri.startsWith("data:")
     ? {
@@ -104,6 +150,21 @@ const materializeAttachment = Effect.fn("SessionPrompt.materializeAttachment")(f
         mime: undefined,
       }
     : yield* readFileAttachment(input.uri)
+  return [yield* createAttachment(input, resolved)]
+})
+
+const createAttachment = Effect.fnUntraced(function* (
+  input: PromptInput.FileAttachment,
+  resolved: {
+    readonly bytes: Uint8Array
+    readonly source: { readonly type: "inline" } | { readonly type: "uri"; readonly uri: string }
+    readonly start: number | undefined
+    readonly end: number | undefined
+    readonly name: string | undefined
+    readonly mime: string | undefined
+  },
+) {
+  const label = attachmentLabel(input)
   if (resolved.bytes.byteLength > MAX_ATTACHMENT_BYTES)
     return yield* new AttachmentError({
       uri: label,
@@ -131,6 +192,22 @@ const materializeAttachment = Effect.fn("SessionPrompt.materializeAttachment")(f
     mention: input.mention,
   })
 })
+
+function decodeMcpBlob(uri: string, blob: string) {
+  return Effect.try({
+    try: () => {
+      const bytes = Buffer.from(blob, "base64")
+      if (bytes.toString("base64") !== blob) throw new Error("Non-canonical base64")
+      return bytes
+    },
+    catch: () => new AttachmentError({ uri, message: `MCP resource returned invalid base64 content: ${uri}` }),
+  })
+}
+
+function base64ByteLength(value: string) {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0
+  return Math.floor(value.length * 0.75) - padding
+}
 
 const normalizeImageAttachment = Effect.fn("SessionPrompt.normalizeImageAttachment")(function* (
   input: PromptInput.FileAttachment,
@@ -201,6 +278,7 @@ const readFileAttachment = Effect.fn("SessionPrompt.readFileAttachment")(functio
 })
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+const MAX_MCP_ATTACHMENT_PARTS = 100
 
 // A data URL is the whole file; errors and logs must name the attachment, not echo its bytes.
 function attachmentLabel(input: PromptInput.FileAttachment) {
