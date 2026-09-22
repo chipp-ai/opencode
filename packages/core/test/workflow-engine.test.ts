@@ -34,11 +34,15 @@ import { WorkflowEngine } from "@opencode-ai/core/workflow/engine"
 import { testEffect } from "./lib/effect"
 
 let response: LLMEvent[] = []
+let streamCalls = 0
 const client = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
     prepare: () => Effect.die("unused"),
-    stream: (() => Stream.fromIterable(response)) as unknown as LLMClientShape["stream"],
+    stream: (() => {
+      streamCalls++
+      return Stream.fromIterable(response)
+    }) as unknown as LLMClientShape["stream"],
     generate: () => Effect.die("unused"),
   }),
 )
@@ -286,6 +290,73 @@ describe("WorkflowEngine.run", () => {
       })
 
       expect(result).toEqual({ verdict: "yes" })
+    }),
+  )
+
+  it.effect("resuming with an unchanged script replays both calls from the journal at zero cost", () =>
+    Effect.gen(function* () {
+      streamCalls = 0
+      response = reply("first-answer")
+      let runID = ""
+      const script = async (ctx: WorkflowEngine.Context) => {
+        const a = await ctx.agent("first")
+        response = reply("second-answer")
+        const b = await ctx.agent("second")
+        return [a, b]
+      }
+
+      const first = yield* WorkflowEngine.run({ location, onRunID: (id) => (runID = id), run: script })
+      expect(first).toEqual(["first-answer", "second-answer"])
+      expect(streamCalls).toBe(2)
+
+      // Resuming re-runs the SAME script from scratch, but both agent() calls should now be
+      // cache hits -- no new stream() calls, and the budget reflects the original run's cost.
+      response = reply("SHOULD NOT BE USED")
+      let spentAfterResume = 0
+      const resumed = yield* WorkflowEngine.run({
+        location,
+        resumeFromRunId: runID,
+        run: async (ctx) => {
+          const value = await script(ctx)
+          spentAfterResume = ctx.budget.spent()
+          return value
+        },
+      })
+
+      expect(resumed).toEqual(["first-answer", "second-answer"])
+      expect(streamCalls).toBe(2)
+      expect(spentAfterResume).toBeGreaterThan(0)
+    }),
+  )
+
+  it.effect("resuming with an edited later call replays the prefix and dispatches only the change", () =>
+    Effect.gen(function* () {
+      streamCalls = 0
+      response = reply("first-answer")
+      let runID = ""
+      const originalScript = async (ctx: WorkflowEngine.Context) => {
+        const a = await ctx.agent("first")
+        response = reply("second-answer")
+        const b = await ctx.agent("second")
+        return [a, b]
+      }
+
+      yield* WorkflowEngine.run({ location, onRunID: (id) => (runID = id), run: originalScript })
+      expect(streamCalls).toBe(2)
+
+      response = reply("edited-answer")
+      const resumed = yield* WorkflowEngine.run({
+        location,
+        resumeFromRunId: runID,
+        run: async (ctx) => {
+          const a = await ctx.agent("first") // unchanged -- cache hit, no new stream() call
+          const b = await ctx.agent("second-edited") // changed prompt -- diverges, dispatches live
+          return [a, b]
+        },
+      })
+
+      expect(resumed).toEqual(["first-answer", "edited-answer"])
+      expect(streamCalls).toBe(3)
     }),
   )
 })

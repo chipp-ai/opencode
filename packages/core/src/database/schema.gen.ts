@@ -236,6 +236,21 @@ export default {
           CONSTRAINT \`fk_session_share_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
         );
       `)
+      yield* tx.run(`
+        CREATE TABLE \`workflow_run\` (
+          \`id\` text PRIMARY KEY,
+          \`session_id\` text,
+          \`directory\` text NOT NULL,
+          \`name\` text NOT NULL,
+          \`status\` text NOT NULL,
+          \`journal\` text NOT NULL,
+          \`result\` text,
+          \`error\` text,
+          \`resume_of\` text,
+          \`time_created\` integer NOT NULL,
+          \`time_updated\` integer NOT NULL
+        );
+      `)
       yield* tx.run(`CREATE UNIQUE INDEX \`event_aggregate_seq_idx\` ON \`event\` (\`aggregate_id\`,\`seq\`);`)
       yield* tx.run(`CREATE INDEX \`event_aggregate_type_seq_idx\` ON \`event\` (\`aggregate_id\`,\`type\`,\`seq\`);`)
       yield* tx.run(
