@@ -15,6 +15,8 @@ import {
   type ElicitResult,
   type GetPromptResult,
   type Implementation,
+  type ListResourcesResult,
+  type ListResourceTemplatesResult,
   type OAuthClientProvider,
   type Prompt,
   type ReadResourceResult,
@@ -96,6 +98,10 @@ export interface Connection {
   readonly prompts: () => Effect.Effect<Prompt[], Error>
   readonly resources: () => Effect.Effect<Resource[], Error>
   readonly resourceTemplates: () => Effect.Effect<ResourceTemplateType[], Error>
+  readonly listResources: (input: { readonly cursor?: string }) => Effect.Effect<ListResourcesResult, Error>
+  readonly listResourceTemplates: (input: {
+    readonly cursor?: string
+  }) => Effect.Effect<ListResourceTemplatesResult, Error>
   /** Resolves to undefined when the server does not advertise resources. */
   readonly readResource: (input: { readonly uri: string }) => Effect.Effect<ReadResourceResult | undefined, Error>
   readonly prompt: (input: {
@@ -253,11 +259,28 @@ export const connect = Effect.fnUntraced(function* (
         request("list MCP prompts", () => client.listPrompts(undefined, catalog)).pipe(Effect.map((r) => r.prompts)),
       resources: () =>
         request("list MCP resources", () => client.listResources(undefined, catalog)).pipe(
-          Effect.map((r) => r.resources),
+          Effect.map((result) => result.resources),
         ),
       resourceTemplates: () =>
         request("list MCP resource templates", () => client.listResourceTemplates(undefined, catalog)).pipe(
-          Effect.map((r) => r.resourceTemplates),
+          Effect.map((result) => result.resourceTemplates),
+        ),
+      listResources: (input) =>
+        request("list MCP resources", (signal) =>
+          client.request(
+            { method: "resources/list", params: input.cursor === undefined ? {} : { cursor: input.cursor } },
+            { signal, timeout: catalog.timeout },
+          ),
+        ),
+      listResourceTemplates: (input) =>
+        request("list MCP resource templates", (signal) =>
+          client.request(
+            {
+              method: "resources/templates/list",
+              params: input.cursor === undefined ? {} : { cursor: input.cursor },
+            },
+            { signal, timeout: catalog.timeout },
+          ),
         ),
       readResource: (input) => {
         if (!client.getServerCapabilities()?.resources) return Effect.succeed(undefined)

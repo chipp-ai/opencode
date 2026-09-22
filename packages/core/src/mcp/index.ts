@@ -39,16 +39,22 @@ export type ToolResult = McpClient.CallToolResult & { readonly server: ServerNam
 export type Prompt = McpClient.Prompt & { readonly server: ServerName }
 export type PromptResult = McpClient.GetPromptResult & { readonly server: ServerName; readonly name: string }
 
-export const ResourceReference = Mcp.ResourceReference
-export type ResourceReference = Mcp.ResourceReference
-export const resourceUri = Mcp.resourceUri
-export const parseResourceUri = Mcp.parseResourceUri
 export const Resource = Mcp.Resource
 export type Resource = Mcp.Resource
 export const ResourceTemplate = Mcp.ResourceTemplate
 export type ResourceTemplate = Mcp.ResourceTemplate
 export const ResourceCatalog = Mcp.ResourceCatalog
 export type ResourceCatalog = Mcp.ResourceCatalog
+export type ResourceList = {
+  readonly server?: string
+  readonly resources: ReadonlyArray<Resource>
+  readonly nextCursor?: string
+}
+export type ResourceTemplateList = {
+  readonly server?: string
+  readonly resourceTemplates: ReadonlyArray<ResourceTemplate>
+  readonly nextCursor?: string
+}
 export const ResourceContentPart = Mcp.ResourceContentPart
 export type ResourceContentPart = Mcp.ResourceContentPart
 export const ResourceContent = Mcp.ResourceContent
@@ -124,6 +130,14 @@ export interface Interface extends State.Transformable<Editor> {
     readonly args?: Record<string, string>
   }) => Effect.Effect<PromptResult | undefined, NotFoundError>
   readonly resourceCatalog: () => Effect.Effect<ResourceCatalog>
+  readonly listResources: (input: {
+    readonly server?: ServerName | string
+    readonly cursor?: string
+  }) => Effect.Effect<ResourceList, Error>
+  readonly listResourceTemplates: (input: {
+    readonly server?: ServerName | string
+    readonly cursor?: string
+  }) => Effect.Effect<ResourceTemplateList, Error>
   readonly readResource: (input: {
     readonly server: ServerName | string
     readonly uri: string
@@ -717,6 +731,111 @@ export const layer = (options?: Options) =>
                   a.uriTemplate.localeCompare(b.uriTemplate),
               ),
           })
+        }),
+        listResources: Effect.fn("MCP.listResources")(function* (input) {
+          if (input.server !== undefined) {
+            const target = yield* requireServer(input.server)
+            yield* target.entry.startup.await
+            if (!target.entry.client) return { server: target.name, resources: [] }
+            const result = yield* recovering(target.name, target.entry, target.entry.client, (connection) =>
+              connection.listResources({ cursor: input.cursor }),
+            )
+            return {
+              server: target.name,
+              resources: result.resources.map((resource) =>
+                Resource.make({
+                  server: target.name,
+                  name: resource.name,
+                  uri: resource.uri,
+                  description: resource.description,
+                  mimeType: resource.mimeType,
+                }),
+              ),
+              ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }),
+            }
+          }
+          const resources = yield* Effect.forEach(
+            Array.from(entries),
+            ([name, entry]) => {
+              if (!entry.client) return Effect.succeed([])
+              return entry.client.resources().pipe(
+                Effect.map((resources) =>
+                  resources.map((resource) =>
+                    Resource.make({
+                      server: name,
+                      name: resource.name,
+                      uri: resource.uri,
+                      description: resource.description,
+                      mimeType: resource.mimeType,
+                    }),
+                  ),
+                ),
+                Effect.orElseSucceed(() => []),
+              )
+            },
+            { concurrency: "unbounded" },
+          )
+          return {
+            resources: resources
+              .flat()
+              .toSorted(
+                (a, b) => a.server.localeCompare(b.server) || a.name.localeCompare(b.name) || a.uri.localeCompare(b.uri),
+              ),
+          }
+        }),
+        listResourceTemplates: Effect.fn("MCP.listResourceTemplates")(function* (input) {
+          if (input.server !== undefined) {
+            const target = yield* requireServer(input.server)
+            yield* target.entry.startup.await
+            if (!target.entry.client) return { server: target.name, resourceTemplates: [] }
+            const result = yield* recovering(target.name, target.entry, target.entry.client, (connection) =>
+              connection.listResourceTemplates({ cursor: input.cursor }),
+            )
+            return {
+              server: target.name,
+              resourceTemplates: result.resourceTemplates.map((template) =>
+                ResourceTemplate.make({
+                  server: target.name,
+                  name: template.name,
+                  uriTemplate: template.uriTemplate,
+                  description: template.description,
+                  mimeType: template.mimeType,
+                }),
+              ),
+              ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }),
+            }
+          }
+          const templates = yield* Effect.forEach(
+            Array.from(entries),
+            ([name, entry]) => {
+              if (!entry.client) return Effect.succeed([])
+              return entry.client.resourceTemplates().pipe(
+                Effect.map((resourceTemplates) =>
+                  resourceTemplates.map((template) =>
+                    ResourceTemplate.make({
+                      server: name,
+                      name: template.name,
+                      uriTemplate: template.uriTemplate,
+                      description: template.description,
+                      mimeType: template.mimeType,
+                    }),
+                  ),
+                ),
+                Effect.orElseSucceed(() => []),
+              )
+            },
+            { concurrency: "unbounded" },
+          )
+          return {
+            resourceTemplates: templates
+              .flat()
+              .toSorted(
+                (a, b) =>
+                  a.server.localeCompare(b.server) ||
+                  a.name.localeCompare(b.name) ||
+                  a.uriTemplate.localeCompare(b.uriTemplate),
+              ),
+          }
         }),
         readResource: Effect.fn("MCP.readResource")(function* (input) {
           const target = yield* requireServer(input.server)

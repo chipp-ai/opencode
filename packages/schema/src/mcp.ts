@@ -96,33 +96,6 @@ export const Server = Schema.Struct({
   integrationID: optional(IntegrationID),
 }).annotate({ identifier: "Mcp.Server" })
 
-export interface ResourceReference extends Schema.Schema.Type<typeof ResourceReference> {}
-export const ResourceReference = Schema.Struct({
-  server: Schema.String,
-  uri: Schema.String,
-}).annotate({ identifier: "Mcp.ResourceReference" })
-
-export function resourceUri(input: ResourceReference) {
-  const url = new URL("mcp://resource")
-  url.searchParams.set("server", input.server)
-  url.searchParams.set("uri", input.uri)
-  return url.href
-}
-
-export function parseResourceUri(input: string) {
-  try {
-    const url = new URL(input)
-    if (url.protocol !== "mcp:" || url.hostname !== "resource" || url.pathname || url.hash) return
-    const server = url.searchParams.get("server")
-    const uri = url.searchParams.get("uri")
-    if (!server || !uri) return
-    const reference = ResourceReference.make({ server, uri })
-    return resourceUri(reference) === input ? reference : undefined
-  } catch {
-    return
-  }
-}
-
 export interface Resource extends Schema.Schema.Type<typeof Resource> {}
 export const Resource = Schema.Struct({
   server: Schema.String,

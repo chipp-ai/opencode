@@ -21,7 +21,6 @@ import { useFrecency } from "../../prompt/frecency"
 import { Keymap, type KeymapCommand } from "../../context/keymap"
 import { displayCharAt, mentionTriggerIndex, slashTriggerIndex } from "../../prompt/display"
 import type { FileSystemEntry } from "@opencode/client"
-import { Mcp } from "@opencode/schema/mcp"
 import { Skill } from "@opencode/schema/skill"
 import { stringWidth } from "../../util/string-width"
 import { parseFileLineRange, stripFileLineRange } from "../../prompt/parse"
@@ -34,7 +33,7 @@ export type AutocompleteRef = {
   completeQueueableCommand: () => boolean
 }
 
-type AutocompleteOptionKind = "skill" | "agent" | "reference" | "mcp"
+type AutocompleteOptionKind = "skill" | "agent" | "reference"
 
 export type AutocompleteOption = {
   display: string
@@ -407,37 +406,6 @@ export function Autocomplete(props: {
     return { options: [], failed: false, query: "", resolved: false }
   })
 
-  const mcpResources = createMemo(() => {
-    if (store.visible !== "reference") return []
-
-    const options: AutocompleteOption[] = []
-    const width = props.anchor().width - 4
-
-    for (const res of data.location.mcp.resource.list(location.current) ?? []) {
-      const name = `${res.server}:${res.name}`
-      options.push({
-        display: Locale.truncateMiddle(`@${name}`, width),
-        kind: "mcp",
-        // Match the qualified name only; matching the URI caused unrelated fuzzy hits.
-        value: name,
-        description: res.description,
-        onSelect: () => {
-          insertPart(name, {
-            type: "file",
-            value: {
-              uri: Mcp.resourceUri({ server: res.server, uri: res.uri }),
-              name: res.name,
-              description: res.description,
-              mention: { start: 0, end: 0, text: "" },
-            },
-          })
-        },
-      })
-    }
-
-    return options
-  })
-
   const agents = createMemo(() => {
     return (data.location.agent.list() ?? [])
       .filter((agent) => !agent.hidden && agent.mode !== "primary")
@@ -574,7 +542,7 @@ export function Autocomplete(props: {
     const fileOptions: AutocompleteOption[] = store.visible === "reference" ? fileSearch.options : []
     const nonFileOptions: AutocompleteOption[] =
       store.visible === "reference"
-        ? [...skillOptions(), ...referenceAliasesValue, ...agentsValue, ...mcpResources()]
+        ? [...skillOptions(), ...referenceAliasesValue, ...agentsValue]
         : store.index === 0
           ? [...commandsValue]
           : []
@@ -880,7 +848,6 @@ export function Autocomplete(props: {
     skill: "skill",
     agent: "agent",
     reference: "reference",
-    mcp: "mcp",
   }
 
   return (
