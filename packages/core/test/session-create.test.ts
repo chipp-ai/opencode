@@ -60,6 +60,26 @@ describe("SessionV2.create", () => {
     }),
   )
 
+  it.effect("persists parentID and makes it visible to the cost rollup", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const root = yield* session.create({ location })
+      const child = yield* session.create({ location, parentID: root.id })
+
+      expect(child.parentID).toBe(root.id)
+      const rollup = yield* session.cost(root.id)
+      expect(rollup.cost).toBe(0)
+      const { db } = yield* Database.Service
+      const row = yield* db
+        .select({ parent_id: SessionTable.parent_id })
+        .from(SessionTable)
+        .where(eq(SessionTable.id, child.id))
+        .get()
+        .pipe(Effect.orDie)
+      expect(row?.parent_id).toBe(root.id)
+    }),
+  )
+
   it.effect("returns the original session when the ID is retried", () =>
     Effect.gen(function* () {
       const session = yield* SessionV2.Service
