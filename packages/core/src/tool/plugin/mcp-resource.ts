@@ -18,34 +18,30 @@ export const Plugin = {
           name: "list_mcp_resources",
           options: { namespace: "opencode", codemode: true },
           description:
-            "List documents, records, and other data exposed by connected MCP servers. Use this when the user refers to something that is not a local file, then load a match with read_mcp_resource.",
+            "List documents, records, and other data exposed by one MCP server. Use this when the user refers to something that is not a local file, then load a match with read_mcp_resource.",
           input: Schema.Struct({
-            server: Schema.optionalKey(
-              Schema.String.annotate({
-                description: "MCP server name as configured. Omit to search every server at once.",
-              }),
-            ),
+            server: Schema.String.annotate({
+              description: "MCP server name as configured.",
+            }),
             cursor: Schema.optionalKey(
               Schema.String.annotate({
-                description: "nextCursor from the previous page. Requires server.",
+                description: "nextCursor from the previous page of the same server.",
               }),
             ),
           }),
           output: Schema.Struct({
-            server: Schema.optionalKey(Schema.String),
+            server: Schema.String,
             resources: Schema.Array(Mcp.Resource),
             nextCursor: Schema.optionalKey(Schema.String).annotate({
-              description: "Pass as cursor with the same server for the next page.",
+              description: "Pass as cursor for the next page.",
             }),
           }),
           execute: (input, context) =>
             Effect.gen(function* () {
-              if (input.server === undefined && input.cursor !== undefined)
-                return yield* new ToolFailure({ message: "cursor can only be used when a server is specified" })
               yield* permission.assert({
                 action: "opencode_list_mcp_resources",
-                resources: [input.server ?? "*"],
-                save: [input.server ?? "*"],
+                resources: [input.server],
+                save: [input.server],
                 metadata: {},
                 sessionID: context.sessionID,
                 agent: context.agent,
@@ -58,34 +54,30 @@ export const Plugin = {
           name: "list_mcp_resource_templates",
           options: { namespace: "opencode", codemode: true },
           description:
-            "List MCP resources addressed by a parameter such as a record ID or table name. Fill in the returned uriTemplate placeholders, then load the result with read_mcp_resource.",
+            "List one MCP server's resources that are addressed by a parameter such as a record ID or table name. Fill in the returned uriTemplate placeholders, then load the result with read_mcp_resource.",
           input: Schema.Struct({
-            server: Schema.optionalKey(
-              Schema.String.annotate({
-                description: "MCP server name as configured. Omit to search every server at once.",
-              }),
-            ),
+            server: Schema.String.annotate({
+              description: "MCP server name as configured.",
+            }),
             cursor: Schema.optionalKey(
               Schema.String.annotate({
-                description: "nextCursor from the previous page. Requires server.",
+                description: "nextCursor from the previous page of the same server.",
               }),
             ),
           }),
           output: Schema.Struct({
-            server: Schema.optionalKey(Schema.String),
+            server: Schema.String,
             resourceTemplates: Schema.Array(Mcp.ResourceTemplate),
             nextCursor: Schema.optionalKey(Schema.String).annotate({
-              description: "Pass as cursor with the same server for the next page.",
+              description: "Pass as cursor for the next page.",
             }),
           }),
           execute: (input, context) =>
             Effect.gen(function* () {
-              if (input.server === undefined && input.cursor !== undefined)
-                return yield* new ToolFailure({ message: "cursor can only be used when a server is specified" })
               yield* permission.assert({
                 action: "opencode_list_mcp_resource_templates",
-                resources: [input.server ?? "*"],
-                save: [input.server ?? "*"],
+                resources: [input.server],
+                save: [input.server],
                 metadata: {},
                 sessionID: context.sessionID,
                 agent: context.agent,

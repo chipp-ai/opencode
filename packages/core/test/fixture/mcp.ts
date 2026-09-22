@@ -21,8 +21,9 @@ export const emptyMcpLayer = Layer.succeed(
     prompts: () => Effect.succeed([]),
     prompt: () => Effect.undefined,
     resourceCatalog: () => Effect.succeed(Mcp.ResourceCatalog.make({ resources: [], templates: [] })),
-    listResources: () => Effect.succeed({ resources: [] }),
-    listResourceTemplates: () => Effect.succeed({ resourceTemplates: [] }),
+    listResources: (input) => Effect.succeed({ server: Mcp.ServerName.make(input.server), resources: [] }),
+    listResourceTemplates: (input) =>
+      Effect.succeed({ server: Mcp.ServerName.make(input.server), resourceTemplates: [] }),
     readResource: () => Effect.undefined,
   }),
 )
