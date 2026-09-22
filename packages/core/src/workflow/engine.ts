@@ -14,6 +14,7 @@ import type { SessionSchema } from "../session/schema"
 import { ToolRegistry } from "../tool/registry"
 import { WorkflowAgentDispatch } from "./agent-dispatch"
 import { WorkflowJournal } from "./journal"
+import { WorkflowSandbox } from "./sandbox"
 import { WorkflowRunStore } from "./store"
 
 /** A runaway-loop backstop set far above any real workflow -- matches the real Workflow tool's cap. */
@@ -257,3 +258,34 @@ export const run = Effect.fn("WorkflowEngine.run")(function* (input: RunInput) {
   yield* WorkflowRunStore.finish(db, runID, { status: "failed", error: error instanceof Error ? error.message : String(error) })
   return yield* Effect.fail(error)
 })
+
+export type RunSourceInput = Omit<RunInput, "run"> & {
+  /** A workflow script's own source text -- run in an isolated vm context, not the host process. See WorkflowSandbox. */
+  readonly source: string
+  /** Exposed to the script as the bare `args` global, verbatim. */
+  readonly args?: unknown
+}
+
+/**
+ * The real entry point for a user-authored `.opencode/workflows/*.js` file: runs its source in
+ * `WorkflowSandbox` with `agent`/`parallel`/`pipeline`/`phase`/`log`/`budget`/`args` as bare
+ * globals (matching the real Workflow tool's contract) instead of the `run(ctx)`-callback shape
+ * `run()` itself takes -- callers that already have a JS function value (tests, internal
+ * embedding) should call `run()` directly.
+ */
+export const runSource = (input: RunSourceInput) =>
+  run({
+    ...input,
+    run: (ctx) =>
+      WorkflowSandbox.run(input.source, {
+        // The sandbox's Globals.agent takes unknown opts so sandbox.ts doesn't need to depend on
+        // AgentOptions; a script's opts object literal is structurally checked by ctx.agent itself.
+        agent: (prompt, opts) => ctx.agent(prompt, opts as AgentOptions | undefined),
+        parallel: ctx.parallel,
+        pipeline: ctx.pipeline,
+        phase: ctx.phase,
+        log: ctx.log,
+        budget: ctx.budget,
+        args: input.args,
+      }),
+  })

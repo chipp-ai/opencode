@@ -1,6 +1,6 @@
 import { EOL } from "os"
 import path from "path"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap, buildLocationServiceMap } from "@opencode-ai/core/location-services"
@@ -13,11 +13,11 @@ import { WorkflowEngine } from "@opencode-ai/core/workflow/engine"
 import { effectCmd, fail } from "../../effect-cmd"
 
 /**
- * Provisional workflow entry point for Phase 1+ verification only. Loads a plain-JS file whose
- * default export is `async (ctx) => ...` and runs it through WorkflowEngine -- no sandboxing
- * (real `import()`, real global scope), no discovery/.opencode/workflows convention. Phase 4/5
- * replace this with the real sandboxed bare-globals script format and .opencode/workflows/
- * discovery (see FORK_CHANGES.md).
+ * Provisional workflow entry point for real live verification ahead of Phase 5's actual
+ * `.opencode/workflows/` discovery + HTTP API. Runs a plain-JS file's source through
+ * `WorkflowEngine.runSource` -- an isolated vm context with `agent`/`parallel`/`pipeline`/
+ * `phase`/`log`/`budget`/`args` as bare globals (see WorkflowSandbox), matching the real
+ * Workflow tool's contract -- not the host process's own global scope.
  *
  * Real `isolation: 'worktree'` support: adapts opencode's own Worktree.Service (app-layer --
  * depends on InstanceStore/Project/Git/AppProcess, which packages/core must not depend on) to
@@ -40,22 +40,21 @@ const makeWorktreeProvisioner = Effect.fn("Cli.debug.workflow.worktreeProvisione
 
 export const DebugWorkflowCommand = effectCmd({
   command: "workflow <file>",
-  describe: "[provisional] run a workflow script's default-exported run(ctx) function",
+  describe: "[provisional] run a workflow script (bare agent/parallel/pipeline/phase/log/budget/args globals) in a sandbox",
   builder: (yargs) =>
     yargs
-      .positional("file", { describe: "path to a .js/.ts file exporting default async (ctx) => ...", type: "string" })
-      .option("args", { describe: "JSON value passed through as-is (unused by run(ctx) directly; thread it yourself)" })
+      .positional("file", { describe: "path to a .js file -- its source runs with workflow globals, not module exports", type: "string" })
+      .option("args", { describe: "JSON value exposed to the script as the bare `args` global", type: "string" })
       .option("budget", { describe: "USD budget cap for this run", type: "number" })
       .option("resume", { describe: "runID to resume (replays its journal; unchanged agent() calls are free)", type: "string" }),
   handler: (args) =>
     Effect.gen(function* () {
       const file = path.resolve(process.cwd(), args.file as string)
-      const module = yield* Effect.promise(() => import(file))
-      const script = module.default as (ctx: WorkflowEngine.Context) => Promise<unknown>
-      if (typeof script !== "function") return yield* fail(`${file} has no default-exported function`)
+      const source = yield* Effect.promise(() => Bun.file(file).text())
+      const parsedArgs = args.args ? yield* parseArgsJson(args.args) : undefined
 
       const worktree = yield* makeWorktreeProvisioner()
-      const result = yield* WorkflowEngine.run({
+      const result = yield* WorkflowEngine.runSource({
         location: Location.Ref.make({ directory: AbsolutePath.make(process.cwd()) }),
         budgetUsd: args.budget ?? null,
         resumeFromRunId: args.resume,
@@ -64,7 +63,8 @@ export const DebugWorkflowCommand = effectCmd({
         onLog: (message) => process.stdout.write(`${message}\n`),
         onRunID: (id) => process.stderr.write(`runID: ${id}\n`),
         worktree,
-        run: script,
+        source,
+        args: parsedArgs,
       })
       process.stdout.write(JSON.stringify(result, null, 2) + EOL)
     }).pipe(
@@ -82,3 +82,8 @@ export const DebugWorkflowCommand = effectCmd({
       Effect.provide(buildLocationServiceMap()),
     ),
 })
+
+function parseArgsJson(raw: string) {
+  const option = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)(raw)
+  return option._tag === "Some" ? Effect.succeed(option.value) : fail(`--args is not valid JSON: ${raw}`)
+}
