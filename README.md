@@ -48,7 +48,7 @@
 
 ### Fork changes
 
-This fork adds subagent cost roll-up: session cost/tokens shown in the TUI sidebar and footer, `opencode stats`, and ACP's `usage_update` now include spend from subagent (Task tool) sessions, not just the root session — fixing [anomalyco/opencode#45417](https://github.com/anomalyco/opencode/issues/45417), [#39740](https://github.com/anomalyco/opencode/issues/39740), [#40114](https://github.com/anomalyco/opencode/issues/40114), and [#31032](https://github.com/anomalyco/opencode/issues/31032) (forked sessions double-counting inherited cost). See the [`dev` branch history](https://github.com/chipp-ai/opencode/commits/dev) for the exact commits on top of upstream.
+This fork tracks upstream `dev` and adds a small set of features/fixes upstream hasn't merged — see **[FORK_CHANGES.md](./FORK_CHANGES.md)** for the full, maintained list (what's implemented, what's in progress, and why). Currently: subagent cost roll-up (implemented) and Claude-Code-style dynamic workflows (in progress).
 
 ### Installation
 
