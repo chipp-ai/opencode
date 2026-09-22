@@ -213,4 +213,32 @@ describe("WorkflowAgentDispatch.run", () => {
       expect(yield* agents.get(created.agent!)).toBeUndefined()
     }),
   )
+
+  it.effect("captures a StructuredOutput tool call and stops before further steps", () =>
+    Effect.gen(function* () {
+      response = ([
+        { type: "tool-call", id: "call_1", name: "StructuredOutput", input: { answer: 42 } },
+        { type: "step-finish", index: 0, reason: "tool-calls", usage: new Usage({ inputTokens: 1, outputTokens: 1 }) },
+        { type: "finish", reason: "tool-calls" },
+      ] as unknown) as LLMEvent[]
+
+      const result = yield* WorkflowAgentDispatch.run({
+        location,
+        persona: "You are a helpful test agent.",
+        prompt: { text: "what is the answer?" },
+        structuredOutput: { schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"] } },
+      })
+
+      expect(result.structured).toEqual({ answer: 42 })
+      expect(result.timedOut).toBe(false)
+    }),
+  )
+
+  it.effect("does not register a StructuredOutput tool when no schema is requested", () =>
+    Effect.gen(function* () {
+      response = okResponse()
+      const result = yield* WorkflowAgentDispatch.run({ location, persona: "test", prompt: { text: "hi" } })
+      expect(result.structured).toBeUndefined()
+    }),
+  )
 })

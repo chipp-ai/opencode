@@ -268,4 +268,24 @@ describe("WorkflowEngine.run", () => {
       expect(String(error)).toContain("budget")
     }),
   )
+
+  it.effect("agent() with a schema resolves to the captured structured object", () =>
+    Effect.gen(function* () {
+      response = ([
+        { type: "tool-call", id: "call_1", name: "StructuredOutput", input: { verdict: "yes" } },
+        { type: "step-finish", index: 0, reason: "tool-calls", usage: new Usage({ inputTokens: 1, outputTokens: 1 }) },
+        { type: "finish", reason: "tool-calls" },
+      ] as unknown) as LLMEvent[]
+
+      const result = yield* WorkflowEngine.run({
+        location,
+        run: async (ctx) =>
+          ctx.agent("judge this", {
+            schema: { type: "object", properties: { verdict: { type: "string" } }, required: ["verdict"] },
+          }),
+      })
+
+      expect(result).toEqual({ verdict: "yes" })
+    }),
+  )
 })

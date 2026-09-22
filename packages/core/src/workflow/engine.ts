@@ -9,6 +9,7 @@ import type { ModelV2 } from "../model"
 import type { PermissionV2 } from "../permission"
 import { SessionV2 } from "../session"
 import type { SessionSchema } from "../session/schema"
+import { ToolRegistry } from "../tool/registry"
 import { WorkflowAgentDispatch } from "./agent-dispatch"
 
 /** A runaway-loop backstop set far above any real workflow -- matches the real Workflow tool's cap. */
@@ -22,6 +23,12 @@ export type AgentOptions = {
   readonly permissions?: PermissionV2.Ruleset
   readonly steps?: number
   readonly timeoutMs?: number
+  /**
+   * A JSON-Schema-shaped object. When set, `agent()` resolves to the captured tool-call
+   * arguments instead of the final text -- see WorkflowAgentDispatch.Input.structuredOutput
+   * for exactly what guarantee this does (and does not) provide.
+   */
+  readonly schema?: Record<string, unknown>
 }
 
 export type Budget = {
@@ -31,7 +38,7 @@ export type Budget = {
 }
 
 export type Context = {
-  readonly agent: (prompt: string, opts?: AgentOptions) => Promise<string>
+  readonly agent: (prompt: string, opts?: AgentOptions) => Promise<unknown>
   readonly parallel: <T>(thunks: ReadonlyArray<() => Promise<T>>) => Promise<Array<T | null>>
   readonly pipeline: <T>(
     items: ReadonlyArray<T>,
@@ -76,11 +83,12 @@ class BudgetExhaustedError extends Error {
  * services (AgentV2, SessionV2, Database, etc. for `input.location`) carry through every
  * bridged call.
  *
- * No persistence, pause/resume, worktree isolation, or structured output yet -- single
- * in-memory run only (see FORK_CHANGES.md for the phased rollout).
+ * No persistence, pause/resume, or worktree isolation yet -- single in-memory run only
+ * (see FORK_CHANGES.md for the phased rollout). `ctx.agent(prompt, {schema})` is supported
+ * (see WorkflowAgentDispatch.Input.structuredOutput for its exact, scoped guarantee).
  */
 export const run = Effect.fn("WorkflowEngine.run")(function* (input: RunInput) {
-  const context = yield* Effect.context<AgentV2.Service | SessionV2.Service | Database.Service>()
+  const context = yield* Effect.context<AgentV2.Service | SessionV2.Service | Database.Service | ToolRegistry.Service>()
   const concurrency = input.concurrency ?? defaultConcurrency()
   const total = input.budgetUsd ?? null
   let spentUsd = 0
@@ -99,10 +107,11 @@ export const run = Effect.fn("WorkflowEngine.run")(function* (input: RunInput) {
         steps: opts?.steps,
         model: opts?.model,
         timeoutMs: opts?.timeoutMs,
+        structuredOutput: opts?.schema ? { schema: opts.schema } : undefined,
         prompt: { text: prompt },
       })
       spentUsd += result.cost
-      return result.text
+      return opts?.schema ? (result.structured ?? result.text) : result.text
     })
 
   const agent: Context["agent"] = (prompt, opts) => Effect.runPromiseWith(context)(dispatchOne(prompt, opts))
