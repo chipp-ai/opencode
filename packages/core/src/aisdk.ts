@@ -697,7 +697,11 @@ function metadataProviderOptions(input: ProviderMetadata | undefined): SharedV3P
 }
 
 function streamLanguage(language: LanguageModelV3, options: LanguageModelV3CallOptions, http?: HttpMiddleware) {
-  const state = { step: 0, toolNames: {} as Record<string, string> }
+  const state: StreamState = {
+    step: 0,
+    toolNames: {},
+    pendingReasoning: new Map(),
+  }
   return Stream.concat(
     Stream.make(LLMEvent.stepStart({ index: state.step })),
     Stream.unwrap(
@@ -723,8 +727,16 @@ function streamLanguage(language: LanguageModelV3, options: LanguageModelV3CallO
   )
 }
 
+type StreamState = {
+  step: number
+  toolNames: Record<string, string>
+  reasoning?: { id: string; providerMetadata?: ProviderMetadata }
+  // AI SDK streams may interleave fragments, while Session persists one reasoning fragment at a time.
+  pendingReasoning: Map<string, LLMEvent[]>
+}
+
 function streamPartEvents(
-  state: { step: number; toolNames: Record<string, string> },
+  state: StreamState,
   event: LanguageModelV3StreamPart,
 ): Effect.Effect<ReadonlyArray<LLMEvent>, AIError> {
   switch (event.type) {
@@ -751,22 +763,46 @@ function streamPartEvents(
       return Effect.succeed([
         LLMEvent.textEnd({ id: event.id, providerMetadata: providerMetadata(event.providerMetadata) }),
       ])
-    case "reasoning-start":
-      return Effect.succeed([
-        LLMEvent.reasoningStart({ id: event.id, providerMetadata: providerMetadata(event.providerMetadata) }),
-      ])
-    case "reasoning-delta":
-      return Effect.succeed([
-        LLMEvent.reasoningDelta({
-          id: event.id,
-          text: event.delta,
-          providerMetadata: providerMetadata(event.providerMetadata),
-        }),
-      ])
-    case "reasoning-end":
-      return Effect.succeed([
-        LLMEvent.reasoningEnd({ id: event.id, providerMetadata: providerMetadata(event.providerMetadata) }),
-      ])
+    case "reasoning-start": {
+      const start = LLMEvent.reasoningStart({
+        id: event.id,
+        providerMetadata: providerMetadata(event.providerMetadata),
+      })
+      if (!state.reasoning) {
+        state.reasoning = { id: event.id, providerMetadata: start.providerMetadata }
+        return Effect.succeed([start])
+      }
+      if (state.reasoning.id === event.id || state.pendingReasoning.has(event.id)) return Effect.succeed([start])
+      state.pendingReasoning.set(event.id, [start])
+      return Effect.succeed([])
+    }
+    case "reasoning-delta": {
+      const delta = LLMEvent.reasoningDelta({
+        id: event.id,
+        text: event.delta,
+        providerMetadata: providerMetadata(event.providerMetadata),
+      })
+      const pending = state.pendingReasoning.get(event.id)
+      if (!pending) return Effect.succeed([delta])
+      pending.push(delta)
+      return Effect.succeed([])
+    }
+    case "reasoning-end": {
+      const end = LLMEvent.reasoningEnd({
+        id: event.id,
+        providerMetadata: providerMetadata(event.providerMetadata),
+      })
+      const pending = state.pendingReasoning.get(event.id)
+      if (pending) {
+        pending.push(end)
+        return Effect.succeed([])
+      }
+      if (state.reasoning?.id !== event.id) return Effect.succeed([end])
+      state.reasoning = undefined
+      const events: LLMEvent[] = [end]
+      resumePendingReasoning(state, events, false)
+      return Effect.succeed(events)
+    }
     case "tool-input-start":
       state.toolNames[event.id] = event.toolName
       return Effect.succeed([
@@ -824,8 +860,19 @@ function streamPartEvents(
           providerMetadata: providerMetadata(event.providerMetadata),
         }),
       ])
-    case "finish":
-      return Effect.succeed([
+    case "finish": {
+      const events: LLMEvent[] = []
+      if (state.reasoning && state.pendingReasoning.size > 0) {
+        events.push(
+          LLMEvent.reasoningEnd({
+            id: state.reasoning.id,
+            providerMetadata: state.reasoning.providerMetadata,
+          }),
+        )
+        state.reasoning = undefined
+      }
+      resumePendingReasoning(state, events, true)
+      events.push(
         LLMEvent.stepFinish({
           index: state.step++,
           reason: { normalized: finishReason(event.finishReason), raw: event.finishReason.raw },
@@ -837,10 +884,30 @@ function streamPartEvents(
           usage: usage(event.usage),
           providerMetadata: providerMetadata(event.providerMetadata),
         }),
-      ])
+      )
+      return Effect.succeed(events)
+    }
     case "error":
       return Effect.fail(llmError(event.error, "read"))
   }
+}
+
+function resumePendingReasoning(state: StreamState, events: LLMEvent[], closeIncomplete: boolean): void {
+  const next = state.pendingReasoning.entries().next()
+  if (next.done) return
+  const id = next.value[0]
+  const queued = next.value[1]
+  state.pendingReasoning.delete(id)
+  events.push(...queued)
+  if (!queued.some(LLMEvent.is.reasoningEnd)) {
+    const start = queued.find(LLMEvent.is.reasoningStart)
+    if (!closeIncomplete) {
+      state.reasoning = { id, providerMetadata: start?.providerMetadata }
+      return
+    }
+    events.push(LLMEvent.reasoningEnd({ id, providerMetadata: start?.providerMetadata }))
+  }
+  resumePendingReasoning(state, events, closeIncomplete)
 }
 
 function usage(input: Extract<LanguageModelV3StreamPart, { type: "finish" }>["usage"]): UsageInput | undefined {

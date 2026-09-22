@@ -384,6 +384,74 @@ it.effect("routes AI Gateway model options by upstream prefix", () =>
   }),
 )
 
+it.effect("serializes interleaved AI SDK reasoning fragments", () =>
+  Effect.gen(function* () {
+    // Vercel AI Gateway can start summary index 1 before index 0 ends (#50662).
+    const aisdk = yield* AISDK.Service
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = {
+        languageModel: () =>
+          streamModel([
+            { type: "reasoning-start", id: "rs_1:0", providerMetadata: { gateway: { generationId: "gen_1" } } },
+            { type: "reasoning-start", id: "rs_1:1" },
+            { type: "reasoning-delta", id: "rs_1:1", delta: "Second summary" },
+            { type: "reasoning-end", id: "rs_1:0" },
+            { type: "reasoning-end", id: "rs_1:1" },
+            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+          ]),
+      }
+    })
+
+    const resolved = yield* aisdk.model(model("@ai-sdk/gateway"))
+    const response = yield* LLMClient.generate(LLM.request({ model: resolved, prompt: "Think" })).pipe(
+      Effect.provide(client),
+    )
+
+    expect(response.events.filter((event) => event.type.startsWith("reasoning-"))).toEqual([
+      {
+        type: "reasoning-start",
+        id: "rs_1:0",
+        providerMetadata: { gateway: { generationId: "gen_1" } },
+      },
+      { type: "reasoning-end", id: "rs_1:0", providerMetadata: undefined },
+      { type: "reasoning-start", id: "rs_1:1", providerMetadata: undefined },
+      { type: "reasoning-delta", id: "rs_1:1", text: "Second summary", providerMetadata: undefined },
+      { type: "reasoning-end", id: "rs_1:1", providerMetadata: undefined },
+    ])
+  }),
+)
+
+it.effect("closes missing AI SDK reasoning boundaries before finish", () =>
+  Effect.gen(function* () {
+    const aisdk = yield* AISDK.Service
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = {
+        languageModel: () =>
+          streamModel([
+            { type: "reasoning-start", id: "rs_1:0" },
+            { type: "reasoning-start", id: "rs_1:1" },
+            { type: "reasoning-delta", id: "rs_1:1", delta: "Second summary" },
+            { type: "reasoning-end", id: "rs_1:1" },
+            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+          ]),
+      }
+    })
+
+    const resolved = yield* aisdk.model(model("@ai-sdk/gateway"))
+    const response = yield* LLMClient.generate(LLM.request({ model: resolved, prompt: "Think" })).pipe(
+      Effect.provide(client),
+    )
+
+    expect(response.events.filter((event) => event.type.startsWith("reasoning-")).map((event) => event.type)).toEqual([
+      "reasoning-start",
+      "reasoning-end",
+      "reasoning-start",
+      "reasoning-delta",
+      "reasoning-end",
+    ])
+  }),
+)
+
 it.effect("projects replay metadata onto AI SDK prompt parts", () =>
   Effect.gen(function* () {
     const aisdk = yield* AISDK.Service
