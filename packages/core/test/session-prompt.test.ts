@@ -40,6 +40,7 @@ const execution = Layer.succeed(
       Effect.sync(() => {
         wakeCalls.push(sessionID)
       }),
+    join: () => Effect.void,
   }),
 )
 const it = testEffect(

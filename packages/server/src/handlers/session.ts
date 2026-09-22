@@ -222,11 +222,14 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 }),
               ),
             ),
-            Effect.catchTag("Session.OperationUnavailableError", (error) =>
+            // Any remaining failure is the drain itself erroring (SessionRunner.RunError) — the
+            // wait endpoint reports that the session isn't idle-and-healthy rather than surfacing
+            // provider-level error detail over this route.
+            Effect.catch((error) =>
               Effect.fail(
                 new ServiceUnavailableError({
-                  message: `Session ${error.operation} is not available yet`,
-                  service: `session.${error.operation}`,
+                  message: `Session wait failed: ${String(error)}`,
+                  service: "session.wait",
                 }),
               ),
             ),

@@ -12,6 +12,12 @@ export interface Coordinator<Key, E> {
   readonly wake: (key: Key) => Effect.Effect<void>
   /** Stops active execution and waits for its cleanup. */
   readonly interrupt: (key: Key) => Effect.Effect<void>
+  /**
+   * Awaits the current execution's settlement, or returns immediately if idle.
+   * Unlike `run`, never starts a new drain — safe to call after a `wake` whose
+   * caller only wants to know when that admission's work has settled.
+   */
+  readonly join: (key: Key) => Effect.Effect<void, E>
 }
 
 type Entry<E> = {
@@ -26,6 +32,12 @@ export const make = <Key, E>(options: {
 }): Effect.Effect<Coordinator<Key, E>, never, Scope.Scope> =>
   Effect.gen(function* () {
     const active = new Map<Key, Entry<E>>()
+    // Mirrors the Deferred of whatever entry was most recently created for a key, independent of
+    // `active`'s deletion on settle. A completed Deferred is cheap to re-await, so `join` can
+    // answer "what did the last admission for this key settle with" even when it raced the
+    // drain finishing (e.g. a drain with no async boundary can settle, and be deleted from
+    // `active`, before the caller's next `join` call gets a scheduling turn).
+    const lastDone = new Map<Key, Deferred.Deferred<void, E>>()
     const fork = yield* FiberSet.makeRuntime<never, void, never>()
 
     const makeEntry = (): Entry<E> => ({
@@ -59,6 +71,7 @@ export const make = <Key, E>(options: {
       if (successor === undefined) active.delete(key)
       else {
         active.set(key, successor)
+        lastDone.set(key, successor.done)
         start(key, successor, false, true)
       }
       Deferred.doneUnsafe(entry.done, exit)
@@ -74,6 +87,7 @@ export const make = <Key, E>(options: {
 
         const next = makeEntry()
         active.set(key, next)
+        lastDone.set(key, next.done)
         start(key, next, true)
         return restore(Deferred.await(next.done))
       })
@@ -88,6 +102,7 @@ export const make = <Key, E>(options: {
 
         const next = makeEntry()
         active.set(key, next)
+        lastDone.set(key, next.done)
         start(key, next, false)
       })
 
@@ -100,5 +115,12 @@ export const make = <Key, E>(options: {
         return Fiber.interrupt(entry.owner)
       })
 
-    return { active: Effect.sync(() => new Set(active.keys())), run, wake, interrupt }
+    const join = (key: Key): Effect.Effect<void, E> =>
+      Effect.suspend(() => {
+        const deferred = lastDone.get(key)
+        if (deferred === undefined) return Effect.void
+        return Deferred.await(deferred)
+      })
+
+    return { active: Effect.sync(() => new Set(active.keys())), run, wake, interrupt, join }
   })

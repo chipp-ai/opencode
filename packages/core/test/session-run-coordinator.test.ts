@@ -415,4 +415,90 @@ describe("SessionRunCoordinator", () => {
       }),
     ),
   )
+
+  it.effect("join returns immediately for an idle key without starting a drain", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let runs = 0
+        const coordinator = yield* SessionRunCoordinator.make<string, never>({
+          drain: () => Effect.sync(() => runs++),
+        })
+
+        yield* coordinator.join("session")
+
+        expect(runs).toBe(0)
+      }),
+    ),
+  )
+
+  it.effect("join awaits the drain a prior wake already started", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>()
+        const gate = yield* Deferred.make<void>()
+        let runs = 0
+        let joined = false
+        const coordinator = yield* SessionRunCoordinator.make<string, never>({
+          drain: () =>
+            Effect.sync(() => runs++).pipe(
+              Effect.andThen(Deferred.succeed(started, undefined)),
+              Effect.andThen(Deferred.await(gate)),
+            ),
+        })
+
+        yield* coordinator.wake("session")
+        yield* Deferred.await(started)
+        const fiber = yield* coordinator
+          .join("session")
+          .pipe(
+            Effect.tap(() => Effect.sync(() => (joined = true))),
+            Effect.forkChild,
+          )
+        yield* Effect.yieldNow
+        yield* Effect.yieldNow
+
+        expect(joined).toBe(false)
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.join(fiber)
+
+        expect(joined).toBe(true)
+        expect(runs).toBe(1)
+      }),
+    ),
+  )
+
+  it.effect("join propagates the drain's failure", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const failure = new Error("boom")
+        const coordinator = yield* SessionRunCoordinator.make<string, Error>({
+          drain: () => Effect.fail(failure),
+        })
+
+        yield* coordinator.wake("session")
+        const error = yield* Effect.flip(coordinator.join("session"))
+
+        expect(error).toBe(failure)
+      }),
+    ),
+  )
+
+  it.effect("join does not force an extra turn when nothing is pending", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const forces: boolean[] = []
+        const gate = yield* Deferred.make<void>()
+        const coordinator = yield* SessionRunCoordinator.make<string, never>({
+          drain: (_key, force) => Effect.sync(() => forces.push(force)).pipe(Effect.andThen(Deferred.await(gate))),
+        })
+
+        yield* coordinator.wake("session")
+        yield* Effect.yieldNow
+        yield* Deferred.succeed(gate, undefined)
+        yield* coordinator.join("session")
+
+        expect(forces).toEqual([false])
+      }),
+    ),
+  )
 })
