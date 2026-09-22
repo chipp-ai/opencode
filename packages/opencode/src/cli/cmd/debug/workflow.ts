@@ -12,11 +12,11 @@ import { WorkflowEngine } from "@opencode-ai/core/workflow/engine"
 import { effectCmd, fail } from "../../effect-cmd"
 
 /**
- * Provisional workflow entry point for Phase 1 verification only. Loads a plain-JS file whose
+ * Provisional workflow entry point for Phase 1+ verification only. Loads a plain-JS file whose
  * default export is `async (ctx) => ...` and runs it through WorkflowEngine -- no sandboxing
- * (real `import()`, real global scope), no discovery/.opencode/workflows convention, no
- * persistence/resume/worktree isolation. Phase 4/5 replace this with the real sandboxed
- * bare-globals script format and .opencode/workflows/ discovery (see FORK_CHANGES.md).
+ * (real `import()`, real global scope), no discovery/.opencode/workflows convention, no worktree
+ * isolation. Phase 4/5 replace this with the real sandboxed bare-globals script format and
+ * .opencode/workflows/ discovery (see FORK_CHANGES.md).
  */
 export const DebugWorkflowCommand = effectCmd({
   command: "workflow <file>",
@@ -25,7 +25,8 @@ export const DebugWorkflowCommand = effectCmd({
     yargs
       .positional("file", { describe: "path to a .js/.ts file exporting default async (ctx) => ...", type: "string" })
       .option("args", { describe: "JSON value passed through as-is (unused by run(ctx) directly; thread it yourself)" })
-      .option("budget", { describe: "USD budget cap for this run", type: "number" }),
+      .option("budget", { describe: "USD budget cap for this run", type: "number" })
+      .option("resume", { describe: "runID to resume (replays its journal; unchanged agent() calls are free)", type: "string" }),
   handler: (args) =>
     Effect.gen(function* () {
       const file = path.resolve(process.cwd(), args.file as string)
@@ -36,8 +37,11 @@ export const DebugWorkflowCommand = effectCmd({
       const result = yield* WorkflowEngine.run({
         location: Location.Ref.make({ directory: AbsolutePath.make(process.cwd()) }),
         budgetUsd: args.budget ?? null,
+        resumeFromRunId: args.resume,
+        name: path.basename(file),
         onPhase: (title) => process.stdout.write(`\n== ${title} ==\n`),
         onLog: (message) => process.stdout.write(`${message}\n`),
+        onRunID: (id) => process.stderr.write(`runID: ${id}\n`),
         run: script,
       })
       process.stdout.write(JSON.stringify(result, null, 2) + EOL)
