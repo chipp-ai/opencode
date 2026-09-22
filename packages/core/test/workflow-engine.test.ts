@@ -359,4 +359,60 @@ describe("WorkflowEngine.run", () => {
       expect(streamCalls).toBe(3)
     }),
   )
+
+  it.effect("agent({isolation: 'worktree'}) dies loudly when no provisioner is configured", () =>
+    Effect.gen(function* () {
+      response = reply("the answer is 42")
+      const exit = yield* Effect.exit(
+        WorkflowEngine.run({
+          location,
+          run: (ctx) => ctx.agent("hi", { isolation: "worktree" }),
+        }),
+      )
+      expect(exit._tag).toBe("Failure")
+      expect(String(exit)).toContain("worktree provisioner")
+    }),
+  )
+
+  it.effect("agent({isolation: 'worktree'}) creates a worktree, dispatches into it, and always cleans up", () =>
+    Effect.gen(function* () {
+      response = reply("the answer is 42")
+      let created: { baseDirectory: string } | undefined
+      let cleanedUp = false
+      const worktree: WorkflowEngine.WorktreeProvisioner = {
+        create: (input) =>
+          Effect.sync(() => {
+            created = input
+            return {
+              directory: "/project/.worktrees/w1",
+              cleanup: Effect.sync(() => {
+                cleanedUp = true
+              }),
+            }
+          }),
+      }
+
+      const session = yield* SessionV2.Service
+      // The test's runner is bound to a single fixed Location ("/project" -- see the harness at
+      // the top of this file), so a session created against the worktree's *different* directory
+      // correctly trips the real runner's own location guard (runner/llm.ts's
+      // `session.location !== bound location -> interrupt`) and never completes its turn. That
+      // guard is pre-existing, separately-tested behavior (location-layer.test.ts) -- this test
+      // only needs to verify the engine's own orchestration around it: the provisioner is called
+      // with the run's base directory, the dispatch is attempted against the returned directory
+      // (proven by the created session's own location below), and cleanup always runs even
+      // though the dispatch itself never settles successfully in this harness.
+      const exit = yield* Effect.exit(
+        WorkflowEngine.run({ location, worktree, run: (ctx) => ctx.agent("hi", { isolation: "worktree" }) }),
+      )
+
+      expect(exit._tag).toBe("Failure")
+      expect(created).toEqual({ baseDirectory: "/project" })
+      expect(cleanedUp).toBe(true)
+
+      const sessions = yield* session.list()
+      const dispatched = sessions.find((s) => s.location.directory === "/project/.worktrees/w1")
+      expect(dispatched).toBeDefined()
+    }),
+  )
 })

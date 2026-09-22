@@ -8,6 +8,7 @@ import { Database } from "../database/database"
 import type { Location } from "../location"
 import type { ModelV2 } from "../model"
 import type { PermissionV2 } from "../permission"
+import { AbsolutePath } from "../schema"
 import { SessionV2 } from "../session"
 import type { SessionSchema } from "../session/schema"
 import { ToolRegistry } from "../tool/registry"
@@ -32,6 +33,30 @@ export type AgentOptions = {
    * for exactly what guarantee this does (and does not) provide.
    */
   readonly schema?: Record<string, unknown>
+  /** Runs this one call in a fresh git worktree -- requires `RunInput.worktree` to be configured. */
+  readonly isolation?: "worktree"
+}
+
+export type WorktreeHandle = {
+  readonly directory: string
+  readonly cleanup: Effect.Effect<void>
+}
+
+/**
+ * The engine's only dependency on git-worktree mechanics -- a minimal port, not an
+ * implementation. The real create/teardown logic (`packages/opencode/src/worktree/index.ts`)
+ * depends on app-layer services (InstanceStore, opencode's own Project, Git, AppProcess) that
+ * `packages/core` must not depend on, so the caller supplies an adapter instead of the engine
+ * reaching up into `packages/opencode` itself.
+ */
+export type WorktreeProvisioner = {
+  readonly create: (input: { readonly baseDirectory: string }) => Effect.Effect<WorktreeHandle, unknown>
+}
+
+class WorktreeIsolationUnconfiguredError extends Error {
+  constructor() {
+    super("agent({isolation: 'worktree'}) requires a worktree provisioner, but this run has none configured")
+  }
 }
 
 export type Budget = {
@@ -68,6 +93,8 @@ export type RunInput = {
   /** Replays the given run's journal: unchanged `agent()` calls return cached results at zero cost. */
   readonly resumeFromRunId?: string
   readonly name?: string
+  /** Enables `agent({isolation: 'worktree'})` for this run -- omit to have those calls fail loudly instead of silently ignoring isolation. */
+  readonly worktree?: WorktreeProvisioner
   readonly run: (ctx: Context) => Promise<unknown>
 }
 
@@ -134,17 +161,35 @@ export const run = Effect.fn("WorkflowEngine.run")(function* (input: RunInput) {
       if (agentCount >= TOTAL_AGENT_CAP) return yield* Effect.die(new AgentCapExceededError())
       if (total !== null && spentUsd >= total) return yield* Effect.die(new BudgetExhaustedError(total))
       agentCount++
-      const result = yield* WorkflowAgentDispatch.run({
-        location: input.location,
-        parentSessionID: input.parentSessionID,
-        persona: opts?.persona ?? input.defaultPersona ?? "You are a helpful assistant completing one focused task.",
-        permissions: opts?.permissions,
-        steps: opts?.steps,
-        model: opts?.model,
-        timeoutMs: opts?.timeoutMs,
-        structuredOutput: opts?.schema ? { schema: opts.schema } : undefined,
-        prompt: { text: prompt },
-      })
+
+      const dispatch = (location: Location.Ref) =>
+        WorkflowAgentDispatch.run({
+          location,
+          parentSessionID: input.parentSessionID,
+          persona: opts?.persona ?? input.defaultPersona ?? "You are a helpful assistant completing one focused task.",
+          permissions: opts?.permissions,
+          steps: opts?.steps,
+          model: opts?.model,
+          timeoutMs: opts?.timeoutMs,
+          structuredOutput: opts?.schema ? { schema: opts.schema } : undefined,
+          prompt: { text: prompt },
+        })
+
+      const result =
+        opts?.isolation === "worktree"
+          ? yield* Effect.gen(function* () {
+              if (!input.worktree) return yield* Effect.die(new WorktreeIsolationUnconfiguredError())
+              return yield* Effect.scoped(
+                Effect.gen(function* () {
+                  const handle = yield* Effect.acquireRelease(input.worktree!.create({ baseDirectory: input.location.directory }), (h) =>
+                    h.cleanup.pipe(Effect.orDie),
+                  )
+                  return yield* dispatch({ directory: AbsolutePath.make(handle.directory), workspaceID: input.location.workspaceID })
+                }),
+              )
+            })
+          : yield* dispatch(input.location)
+
       spentUsd += result.cost
       replay.record(key, {
         sessionID: result.sessionID,
