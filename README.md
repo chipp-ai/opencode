@@ -14,6 +14,9 @@
   <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
 </p>
 
+> [!NOTE]
+> This is **[chipp-ai/opencode](https://github.com/chipp-ai/opencode)**, a public fork of [anomalyco/opencode](https://github.com/anomalyco/opencode) (formerly `sst/opencode`). We track upstream `dev` closely and carry a small set of fixes upstream hasn't merged yet — see [Fork changes](#fork-changes) below. Everything else in this README describes upstream OpenCode; only the Installation section differs for this fork.
+
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.zh.md">简体中文</a> |
@@ -43,7 +46,31 @@
 
 ---
 
+### Fork changes
+
+This fork adds subagent cost roll-up: session cost/tokens shown in the TUI sidebar and footer, `opencode stats`, and ACP's `usage_update` now include spend from subagent (Task tool) sessions, not just the root session — fixing [anomalyco/opencode#45417](https://github.com/anomalyco/opencode/issues/45417), [#39740](https://github.com/anomalyco/opencode/issues/39740), [#40114](https://github.com/anomalyco/opencode/issues/40114), and [#31032](https://github.com/anomalyco/opencode/issues/31032) (forked sessions double-counting inherited cost). See the [`dev` branch history](https://github.com/chipp-ai/opencode/commits/dev) for the exact commits on top of upstream.
+
 ### Installation
+
+```bash
+# From this fork (builds for all platforms, same install script as upstream)
+curl -fsSL https://raw.githubusercontent.com/chipp-ai/opencode/dev/install | bash
+
+# Pin a specific fork release
+curl -fsSL https://raw.githubusercontent.com/chipp-ai/opencode/dev/install | bash -s -- --version 1.18.32-chipp.1
+```
+
+Releases are published at [chipp-ai/opencode/releases](https://github.com/chipp-ai/opencode/releases). To build and install from source instead:
+
+```bash
+git clone https://github.com/chipp-ai/opencode.git && cd opencode/packages/opencode
+bun install
+OPENCODE_VERSION=<version> bun run script/build.ts --single   # current platform only
+./install --binary dist/opencode-<platform>-<arch>/bin/opencode
+```
+
+<details>
+<summary>Upstream's package-manager installs (not maintained by this fork)</summary>
 
 ```bash
 # YOLO
@@ -61,12 +88,14 @@ mise use -g opencode               # Any OS
 nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
 ```
 
+</details>
+
 > [!TIP]
 > Remove versions older than 0.1.x before installing.
 
 ### Desktop App (BETA)
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
+OpenCode is also available as a desktop application (upstream builds only — this fork does not currently publish desktop builds). Download directly from [anomalyco/opencode's releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
 
 | Platform              | Download                           |
 | --------------------- | ---------------------------------- |
@@ -84,18 +113,7 @@ scoop bucket add extras; scoop install extras/opencode-desktop
 
 #### Installation Directory
 
-The install script respects the following priority order for the installation path:
-
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
-
-```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
-```
+The install script always installs to `$HOME/.opencode/bin` and adds that to your shell's PATH. Use `--no-modify-path` to skip the PATH edit, or `-b/--binary <path>` to install a binary you already built (see [Installation](#installation) above) instead of downloading one.
 
 ### Agents
 
@@ -114,11 +132,11 @@ Learn more about [agents](https://opencode.ai/docs/agents).
 
 ### Documentation
 
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
+For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs) (upstream's docs site; this fork doesn't maintain a separate one). The install/build differences above are the only fork-specific behavior.
 
 ### Contributing
 
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
+This fork's own changes live on the [`dev` branch](https://github.com/chipp-ai/opencode/tree/dev) and are tracked against [chipp-ai/opencode issues](https://github.com/chipp-ai/opencode/issues). If you're interested in contributing to upstream OpenCode itself, please read [their contributing docs](./CONTRIBUTING.md) before submitting a pull request there.
 
 ### Building on OpenCode
 
