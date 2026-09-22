@@ -1203,20 +1203,6 @@ test("lists, reads, and reports MCP resource changes", async () => {
           { name: "File", uriTemplate: "docs://{path}", description: undefined, mimeType: undefined },
           { name: "Issue", uriTemplate: "issue://{id}", description: "Issue", mimeType: undefined },
         ])
-        expect(yield* connection.listResources({})).toEqual({
-          resources: [{ name: "Readme", uri: "docs://readme", description: "Project docs", mimeType: undefined }],
-          nextCursor: "resources-2",
-        })
-        expect(yield* connection.listResources({ cursor: "resources-2" })).toEqual({
-          resources: [{ name: "Logo", uri: "docs://logo", description: undefined, mimeType: "image/png" }],
-          nextCursor: undefined,
-        })
-        expect(yield* connection.listResourceTemplates({})).toEqual({
-          resourceTemplates: [
-            { name: "File", uriTemplate: "docs://{path}", description: undefined, mimeType: undefined },
-          ],
-          nextCursor: "templates-2",
-        })
         expect(yield* connection.readResource({ uri: "docs://readme" })).toEqual({
           contents: [
             { uri: "docs://readme", text: "hello", mimeType: "text/plain" },
@@ -1447,35 +1433,19 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
           call: { type: "tool-call", id: "call_resource", name: "execute", input: { code } },
         })
 
+      // The SDK walks every page, so one call returns the full catalog.
       const listed = yield* run('return await tools.opencode.list_mcp_resources({ server: "resources" })')
       expect(JSON.parse(listed.output.output)).toEqual({
-        server: "resources",
-        resources: [{ server: "resources", name: "Readme", uri: "docs://readme" }],
-        nextCursor: "resources-2",
-      })
-      const next = yield* run(
-        'return await tools.opencode.list_mcp_resources({ server: "resources", cursor: "resources-2" })',
-      )
-      expect(JSON.parse(next.output.output)).toEqual({
-        server: "resources",
-        resources: [{ server: "resources", name: "Guide", uri: "docs://guide" }],
+        resources: [
+          { server: "resources", name: "Readme", uri: "docs://readme" },
+          { server: "resources", name: "Guide", uri: "docs://guide" },
+        ],
+        templates: [
+          { server: "resources", name: "File", uriTemplate: "docs://{path}" },
+          { server: "resources", name: "Issue", uriTemplate: "issue://{id}" },
+        ],
       })
       expect(server.state.resourceReads).toEqual([])
-      const templates = yield* run(
-        'return await tools.opencode.list_mcp_resource_templates({ server: "resources" })',
-      )
-      expect(JSON.parse(templates.output.output)).toEqual({
-        server: "resources",
-        resourceTemplates: [{ server: "resources", name: "File", uriTemplate: "docs://{path}" }],
-        nextCursor: "templates-2",
-      })
-      const nextTemplates = yield* run(
-        'return await tools.opencode.list_mcp_resource_templates({ server: "resources", cursor: "templates-2" })',
-      )
-      expect(JSON.parse(nextTemplates.output.output)).toEqual({
-        server: "resources",
-        resourceTemplates: [{ server: "resources", name: "Issue", uriTemplate: "issue://{id}" }],
-      })
 
       assertion = yield* Deferred.make<Permission.AssertInput>()
       const read = yield* run(

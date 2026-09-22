@@ -45,16 +45,6 @@ export const ResourceTemplate = Mcp.ResourceTemplate
 export type ResourceTemplate = Mcp.ResourceTemplate
 export const ResourceCatalog = Mcp.ResourceCatalog
 export type ResourceCatalog = Mcp.ResourceCatalog
-export type ResourceList = {
-  readonly server: ServerName
-  readonly resources: ReadonlyArray<Resource>
-  readonly nextCursor?: string
-}
-export type ResourceTemplateList = {
-  readonly server: ServerName
-  readonly resourceTemplates: ReadonlyArray<ResourceTemplate>
-  readonly nextCursor?: string
-}
 export const ResourceContentPart = Mcp.ResourceContentPart
 export type ResourceContentPart = Mcp.ResourceContentPart
 export const ResourceContent = Mcp.ResourceContent
@@ -130,14 +120,7 @@ export interface Interface extends State.Transformable<Editor> {
     readonly args?: Record<string, string>
   }) => Effect.Effect<PromptResult | undefined, NotFoundError>
   readonly resourceCatalog: () => Effect.Effect<ResourceCatalog>
-  readonly listResources: (input: {
-    readonly server: ServerName | string
-    readonly cursor?: string
-  }) => Effect.Effect<ResourceList, Error>
-  readonly listResourceTemplates: (input: {
-    readonly server: ServerName | string
-    readonly cursor?: string
-  }) => Effect.Effect<ResourceTemplateList, Error>
+  readonly resources: (input: { readonly server: ServerName | string }) => Effect.Effect<ResourceCatalog, Error>
   readonly readResource: (input: {
     readonly server: ServerName | string
     readonly uri: string
@@ -732,16 +715,18 @@ export const layer = (options?: Options) =>
               ),
           })
         }),
-        listResources: Effect.fn("MCP.listResources")(function* (input) {
+        resources: Effect.fn("MCP.resources")(function* (input) {
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
-          if (!target.entry.client) return { server: target.name, resources: [] }
-          const result = yield* recovering(target.name, target.entry, target.entry.client, (connection) =>
-            connection.listResources({ cursor: input.cursor }),
+          if (!target.entry.client) return ResourceCatalog.make({ resources: [], templates: [] })
+          const catalog = yield* recovering(target.name, target.entry, target.entry.client, (connection) =>
+            Effect.all(
+              { resources: connection.resources(), templates: connection.resourceTemplates() },
+              { concurrency: "unbounded" },
+            ),
           )
-          return {
-            server: target.name,
-            resources: result.resources.map((resource) =>
+          return ResourceCatalog.make({
+            resources: catalog.resources.map((resource) =>
               Resource.make({
                 server: target.name,
                 name: resource.name,
@@ -750,19 +735,7 @@ export const layer = (options?: Options) =>
                 mimeType: resource.mimeType,
               }),
             ),
-            ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }),
-          }
-        }),
-        listResourceTemplates: Effect.fn("MCP.listResourceTemplates")(function* (input) {
-          const target = yield* requireServer(input.server)
-          yield* target.entry.startup.await
-          if (!target.entry.client) return { server: target.name, resourceTemplates: [] }
-          const result = yield* recovering(target.name, target.entry, target.entry.client, (connection) =>
-            connection.listResourceTemplates({ cursor: input.cursor }),
-          )
-          return {
-            server: target.name,
-            resourceTemplates: result.resourceTemplates.map((template) =>
+            templates: catalog.templates.map((template) =>
               ResourceTemplate.make({
                 server: target.name,
                 name: template.name,
@@ -771,8 +744,7 @@ export const layer = (options?: Options) =>
                 mimeType: template.mimeType,
               }),
             ),
-            ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }),
-          }
+          })
         }),
         readResource: Effect.fn("MCP.readResource")(function* (input) {
           const target = yield* requireServer(input.server)
