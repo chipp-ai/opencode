@@ -22,7 +22,7 @@ import {
 import { LLMClient, RequestExecutor } from "@opencode/ai/route"
 import { compileRequest } from "@opencode/ai/route/client"
 import { expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { testEffect } from "./lib/effect"
 
@@ -394,7 +394,14 @@ it.effect("serializes interleaved AI SDK reasoning fragments", () =>
           streamModel([
             { type: "reasoning-start", id: "rs_1:0", providerMetadata: { gateway: { generationId: "gen_1" } } },
             { type: "reasoning-start", id: "rs_1:1" },
+            { type: "reasoning-start", id: "rs_1:1" },
             { type: "reasoning-delta", id: "rs_1:1", delta: "Second summary" },
+            { type: "text-start", id: "text_1" },
+            { type: "text-delta", id: "text_1", delta: "Answer" },
+            { type: "text-end", id: "text_1" },
+            { type: "tool-input-start", id: "call_1", toolName: "lookup" },
+            { type: "tool-input-end", id: "call_1" },
+            { type: "tool-call", toolCallId: "call_1", toolName: "lookup", input: "{}" },
             { type: "reasoning-end", id: "rs_1:0" },
             { type: "reasoning-end", id: "rs_1:1" },
             { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
@@ -418,6 +425,7 @@ it.effect("serializes interleaved AI SDK reasoning fragments", () =>
       { type: "reasoning-delta", id: "rs_1:1", text: "Second summary", providerMetadata: undefined },
       { type: "reasoning-end", id: "rs_1:1", providerMetadata: undefined },
     ])
+    expect(response.message.content.map((part) => part.type)).toEqual(["reasoning", "reasoning", "text", "tool-call"])
   }),
 )
 
@@ -428,7 +436,13 @@ it.effect("closes missing AI SDK reasoning boundaries before finish", () =>
       event.sdk = {
         languageModel: () =>
           streamModel([
-            { type: "reasoning-start", id: "rs_1:0" },
+            { type: "reasoning-start", id: "rs_1:0", providerMetadata: { gateway: { generationId: "gen_1" } } },
+            {
+              type: "reasoning-delta",
+              id: "rs_1:0",
+              delta: "First summary",
+              providerMetadata: { gateway: { signature: "latest" } },
+            },
             { type: "reasoning-start", id: "rs_1:1" },
             { type: "reasoning-delta", id: "rs_1:1", delta: "Second summary" },
             { type: "reasoning-end", id: "rs_1:1" },
@@ -444,11 +458,53 @@ it.effect("closes missing AI SDK reasoning boundaries before finish", () =>
 
     expect(response.events.filter((event) => event.type.startsWith("reasoning-")).map((event) => event.type)).toEqual([
       "reasoning-start",
+      "reasoning-delta",
       "reasoning-end",
       "reasoning-start",
       "reasoning-delta",
       "reasoning-end",
     ])
+    expect(response.message.content[0]).toMatchObject({
+      type: "reasoning",
+      text: "First summary",
+      providerMetadata: { gateway: { signature: "latest" } },
+    })
+  }),
+)
+
+it.effect("leaves sequential reasoning unchanged for opaque AI SDK packages", () =>
+  Effect.gen(function* () {
+    const aisdk = yield* AISDK.Service
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = {
+        languageModel: () =>
+          streamModel([
+            { type: "reasoning-start", id: "reasoning" },
+            { type: "reasoning-delta", id: "reasoning", delta: "Think" },
+            { type: "reasoning-end", id: "reasoning" },
+            { type: "text-start", id: "text" },
+            { type: "text-delta", id: "text", delta: "Answer" },
+            { type: "text-end", id: "text" },
+            { type: "reasoning-start", id: "reasoning" },
+            { type: "reasoning-delta", id: "reasoning", delta: "Think again" },
+            { type: "reasoning-end", id: "reasoning" },
+            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+          ]),
+      }
+    })
+
+    for (const packageName of ["@ai-sdk/anthropic", "@ai-sdk/amazon-bedrock", "@ai-sdk/google", "third-party"]) {
+      const resolved = yield* aisdk.model(model(packageName))
+      const response = yield* LLMClient.generate(LLM.request({ model: resolved, prompt: "Think" })).pipe(
+        Effect.provide(client),
+      )
+      expect(response.events.filter(LLMEvent.is.reasoningStart)).toHaveLength(2)
+      expect(response.events.filter(LLMEvent.is.reasoningDelta).map((event) => event.text)).toEqual([
+        "Think",
+        "Think again",
+      ])
+      expect(response.message.content.map((part) => part.type)).toEqual(["reasoning", "text"])
+    }
   }),
 )
 
@@ -848,6 +904,54 @@ const streamFailure = (failure: unknown, streamed = false) =>
       Effect.flip,
     )
   })
+
+it.effect("flushes blocked reasoning before AI SDK stream failures", () =>
+  Effect.gen(function* () {
+    const aisdk = yield* AISDK.Service
+    const failure = new Error("stream failed")
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = {
+        languageModel: () => ({
+          ...streamModel([]),
+          doStream: () => {
+            const parts: LanguageModelV3StreamPart[] = [
+              { type: "reasoning-start", id: "rs_1:0" },
+              { type: "reasoning-start", id: "rs_1:1" },
+              { type: "reasoning-delta", id: "rs_1:1", delta: "Second summary" },
+            ]
+            let index = 0
+            return Promise.resolve({
+              stream: new ReadableStream<LanguageModelV3StreamPart>({
+                pull(controller) {
+                  const event = parts[index++]
+                  if (!event) return controller.error(failure)
+                  controller.enqueue(event)
+                },
+              }),
+            })
+          },
+        }),
+      }
+    })
+
+    const resolved = yield* aisdk.model(model("@ai-sdk/gateway"))
+    const events: LLMEvent[] = []
+    const error = yield* LLMClient.stream(LLM.request({ model: resolved, prompt: "Think" })).pipe(
+      Stream.runForEach((event) => Effect.sync(() => events.push(event))),
+      Effect.provide(client),
+      Effect.flip,
+    )
+
+    expect(error.message).toBe("stream failed")
+    expect(events.filter((event) => event.type.startsWith("reasoning-")).map((event) => event.type)).toEqual([
+      "reasoning-start",
+      "reasoning-end",
+      "reasoning-start",
+      "reasoning-delta",
+      "reasoning-end",
+    ])
+  }),
+)
 
 it.effect("preserves non-empty AI SDK error messages", () =>
   Effect.gen(function* () {
