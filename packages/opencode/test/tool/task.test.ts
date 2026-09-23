@@ -17,6 +17,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
+import type { Tool } from "@/tool/tool"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -651,6 +652,169 @@ describe("tool.task", () => {
       },
     },
   )
+
+  describe("per-call model override", () => {
+    const dispatch = Effect.fn("TaskToolTest.dispatch")(function* (input: {
+      subagent_type: string
+      model?: string
+      variant?: string
+      ask?: Tool.Context["ask"]
+    }) {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const seen: SessionPrompt.PromptInput[] = []
+      const exit = yield* def
+        .execute(
+          {
+            description: "dispatch",
+            prompt: "do something",
+            subagent_type: input.subagent_type,
+            model: input.model,
+            variant: input.variant,
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (prompt) => seen.push(prompt) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: input.ask ?? (() => Effect.void),
+          },
+        )
+        .pipe(Effect.exit)
+      return { exit, seen }
+    })
+
+    const customModelAgent = {
+      config: {
+        agent: {
+          "custom-model-agent": {
+            description: "Agent with a custom model",
+            mode: "subagent" as const,
+            model: "test/different-model",
+          },
+        },
+      },
+    }
+
+    it.instance(
+      "uses the subagent's configured model when no override is given",
+      () =>
+        Effect.gen(function* () {
+          const result = yield* dispatch({ subagent_type: "custom-model-agent" })
+          expect(result.seen[0]?.model).toEqual({
+            providerID: ProviderV2.ID.make("test"),
+            modelID: ModelV2.ID.make("different-model"),
+          })
+          expect(result.seen[0]?.variant).toBeUndefined()
+        }),
+      customModelAgent,
+    )
+
+    it.instance("falls back to the parent model and variant when nothing is configured", () =>
+      Effect.gen(function* () {
+        const result = yield* dispatch({ subagent_type: "general" })
+        expect(result.seen[0]?.model).toEqual(ref)
+        expect(result.seen[0]?.variant).toBe("xhigh")
+      }),
+    )
+
+    it.instance("uses the per-call model override and drops the parent variant", () =>
+      Effect.gen(function* () {
+        const result = yield* dispatch({ subagent_type: "general", model: "test/override-model" })
+        const override = { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("override-model") }
+        expect(Exit.isSuccess(result.exit)).toBe(true)
+        expect(result.seen[0]?.model).toEqual(override)
+        expect(result.seen[0]?.variant).toBeUndefined()
+        if (Exit.isSuccess(result.exit)) expect(result.exit.value.metadata.model).toEqual(override)
+      }),
+    )
+
+    it.instance(
+      "per-call override takes priority over the subagent's configured model",
+      () =>
+        Effect.gen(function* () {
+          const result = yield* dispatch({ subagent_type: "custom-model-agent", model: "other/override-model" })
+          expect(result.seen[0]?.model).toEqual({
+            providerID: ProviderV2.ID.make("other"),
+            modelID: ModelV2.ID.make("override-model"),
+          })
+        }),
+      customModelAgent,
+    )
+
+    it.instance("keeps slashes after the provider in the model id", () =>
+      Effect.gen(function* () {
+        const result = yield* dispatch({ subagent_type: "general", model: " openrouter/anthropic/claude-sonnet-4 " })
+        expect(result.seen[0]?.model).toEqual({
+          providerID: ProviderV2.ID.make("openrouter"),
+          modelID: ModelV2.ID.make("anthropic/claude-sonnet-4"),
+        })
+      }),
+    )
+
+    it.instance("per-call variant overrides the parent turn's variant", () =>
+      Effect.gen(function* () {
+        const inherited = yield* dispatch({ subagent_type: "general", variant: "low" })
+        expect(inherited.seen[0]?.model).toEqual(ref)
+        expect(inherited.seen[0]?.variant).toBe("low")
+        const overridden = yield* dispatch({ subagent_type: "general", model: "test/override-model", variant: "high" })
+        expect(overridden.seen[0]?.variant).toBe("high")
+      }),
+    )
+
+    it.instance("rejects malformed model overrides before dispatching", () =>
+      Effect.gen(function* () {
+        const results = yield* Effect.forEach(["no-slash", "/model", "provider/"], (model) =>
+          dispatch({ subagent_type: "general", model }),
+        )
+        results.forEach((result) => {
+          expect(Exit.isFailure(result.exit)).toBe(true)
+          expect(result.seen).toHaveLength(0)
+        })
+      }),
+    )
+
+    it.instance("asks for model_override permission with the requested model", () =>
+      Effect.gen(function* () {
+        const calls: Parameters<Tool.Context["ask"]>[0][] = []
+        yield* dispatch({
+          subagent_type: "general",
+          model: "test/override-model",
+          ask: (input) => Effect.sync(() => void calls.push(input)),
+        })
+        expect(calls.find((call) => call.permission === "model_override")).toEqual({
+          permission: "model_override",
+          patterns: ["test/override-model"],
+          always: ["test/override-model"],
+          metadata: { description: "dispatch", subagent_type: "general", model: "test/override-model" },
+        })
+      }),
+    )
+
+    it.instance("does not ask for model_override permission without an override", () =>
+      Effect.gen(function* () {
+        const calls: Parameters<Tool.Context["ask"]>[0][] = []
+        yield* dispatch({ subagent_type: "general", ask: (input) => Effect.sync(() => void calls.push(input)) })
+        expect(calls.map((call) => call.permission)).toEqual(["task"])
+      }),
+    )
+
+    it.instance("a denied model_override permission stops the dispatch", () =>
+      Effect.gen(function* () {
+        const result = yield* dispatch({
+          subagent_type: "general",
+          model: "test/override-model",
+          ask: (input) => (input.permission === "model_override" ? Effect.die(new Error("denied")) : Effect.void),
+        })
+        expect(Exit.isFailure(result.exit)).toBe(true)
+        expect(result.seen).toHaveLength(0)
+      }),
+    )
+  })
 
   it.instance("rejects background execution when the experiment is disabled", () =>
     Effect.gen(function* () {

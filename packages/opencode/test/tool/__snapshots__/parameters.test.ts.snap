@@ -313,6 +313,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "A short (3-5 words) description of the task",
       "type": "string",
     },
+    "model": {
+      "description": "Override the subagent model for this invocation only (format: "provider/model-id", e.g. "anthropic/claude-sonnet-4"). Takes priority over the subagent's configured model. Requires the model_override permission.",
+      "type": "string",
+    },
     "prompt": {
       "description": "The task for the agent to perform",
       "type": "string",
@@ -323,6 +327,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
     },
     "task_id": {
       "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+      "type": "string",
+    },
+    "variant": {
+      "description": "Model variant (model-specific reasoning/effort preset, e.g. "high") for this invocation only. Takes priority over the parent turn's variant.",
       "type": "string",
     },
   },

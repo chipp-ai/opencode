@@ -10,6 +10,7 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -49,6 +50,14 @@ const BaseParameterFields = {
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      'Override the subagent model for this invocation only (format: "provider/model-id", e.g. "anthropic/claude-sonnet-4"). Takes priority over the subagent\'s configured model. Requires the model_override permission.',
+  }),
+  variant: Schema.optional(Schema.String).annotate({
+    description:
+      'Model variant (model-specific reasoning/effort preset, e.g. "high") for this invocation only. Takes priority over the parent turn\'s variant.',
+  }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -76,6 +85,14 @@ function renderOutput(input: {
     `</${tag}>`,
     "</task>",
   ].join("\n")
+}
+
+function parseModelOverride(model: string) {
+  const pattern = model.trim()
+  const slash = pattern.indexOf("/")
+  if (slash <= 0 || slash === pattern.length - 1)
+    return Effect.fail(new Error(`Invalid model format: "${model}". Expected "provider/model-id".`))
+  return Effect.succeed({ pattern, ref: Provider.parseModel(pattern) })
 }
 
 export const TaskTool = Tool.define(
@@ -114,6 +131,20 @@ export const TaskTool = Tool.define(
             `Subagent depth limit reached (${cfg.subagent_depth ?? 1}). Increase "subagent_depth" to allow nested subagents.`,
           ),
         )
+      }
+
+      const overrideModel = params.model === undefined ? undefined : yield* parseModelOverride(params.model)
+      if (overrideModel) {
+        yield* ctx.ask({
+          permission: "model_override",
+          patterns: [overrideModel.pattern],
+          always: [overrideModel.pattern],
+          metadata: {
+            description: params.description,
+            subagent_type: params.subagent_type,
+            model: overrideModel.pattern,
+          },
+        })
       }
 
       if (!ctx.extra?.bypassAgentCheck) {
@@ -178,10 +209,14 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      const model = overrideModel?.ref ??
+        next.model ?? {
+          modelID: msg.info.modelID,
+          providerID: msg.info.providerID,
+        }
+      // Variants are model-specific, so the parent turn's variant only carries over when the
+      // child inherits the parent's model; an overridden or configured model starts from its default.
+      const childVariant = params.variant ?? (overrideModel || next.model ? undefined : variant)
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -206,7 +241,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          variant: childVariant,
           agent: next.name,
           parts,
         })

@@ -8,6 +8,11 @@ When NOT to use the Task tool:
 - If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
 - If no available agent is a good fit for the task, use other tools directly
 
+Model selection:
+- You can override the subagent's model for a single invocation by passing `model` in "provider/model-id" format (e.g. "anthropic/claude-sonnet-4"). Use this to match the model to the subtask, e.g. a cheaper/faster model for simple searches or a stronger model for hard reasoning.
+- Precedence is the `model` parameter, then the subagent's configured model, then the current model.
+- Model overrides require the `model_override` permission, which asks the user by default.
+- The optional `variant` parameter selects a model-specific reasoning/effort preset (e.g. "high") for this invocation.
 
 Usage notes:
 1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses

@@ -474,6 +474,13 @@ it.instance("default permission includes doom_loop and external_directory as ask
   }),
 )
 
+it.instance("default permission asks before per-call subagent model overrides", () =>
+  Effect.gen(function* () {
+    const build = yield* load((svc) => svc.get("build"))
+    expect(evalPerm(build, "model_override")).toBe("ask")
+  }),
+)
+
 it.instance("webfetch is allowed by default", () =>
   Effect.gen(function* () {
     const build = yield* load((svc) => svc.get("build"))
