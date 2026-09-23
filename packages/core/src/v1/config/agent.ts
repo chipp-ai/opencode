@@ -12,6 +12,9 @@ const Color = Schema.Union([
 const AgentSchema = Schema.StructWithRest(
   Schema.Struct({
     model: Schema.optional(Schema.String),
+    fallback: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+      description: "Ordered provider/model fallbacks tried when the selected model fails with a transient error",
+    }),
     variant: Schema.optional(Schema.String).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",
     }),
@@ -43,6 +46,7 @@ const AgentSchema = Schema.StructWithRest(
 const KNOWN_KEYS = new Set([
   "name",
   "model",
+  "fallback",
   "variant",
   "prompt",
   "description",

@@ -1685,6 +1685,7 @@ export type PermissionConfig =
 
 export type AgentConfig = {
   model?: string
+  fallback?: Array<string>
   variant?: string
   temperature?: number
   top_p?: number
@@ -1709,6 +1710,7 @@ export type AgentConfig = {
   [key: string]:
     | unknown
     | string
+    | Array<string>
     | number
     | {
         [key: string]: boolean
@@ -3907,6 +3909,7 @@ export type PermissionV2Ruleset = Array<PermissionV2Rule>
 export type AgentV2Info = {
   id: string
   model?: ModelRef
+  fallback?: Array<ModelRef>
   request: ProviderRequest
   system?: string
   description?: string

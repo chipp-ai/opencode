@@ -111,6 +111,7 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
   }
   return {
     model: info.model,
+    fallback: info.fallback,
     variant: info.variant,
     request: Object.keys(body).length ? { body } : undefined,
     system: info.prompt,

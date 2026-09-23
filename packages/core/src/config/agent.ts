@@ -12,6 +12,10 @@ export const Color = Schema.Union([
 
 export class Info extends Schema.Class<Info>("ConfigV2.Agent")({
   model: Schema.String.pipe(Schema.optional),
+  fallback: Schema.String.pipe(Schema.Array, Schema.optional).annotate({
+    description:
+      "Ordered provider/model fallbacks tried when the selected model fails with a retryable, quota, or transport error",
+  }),
   variant: Schema.String.pipe(Schema.optional),
   request: ConfigProvider.Request.pipe(Schema.optional),
   system: Schema.String.pipe(Schema.optional),

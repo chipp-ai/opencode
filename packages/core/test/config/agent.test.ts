@@ -199,6 +199,41 @@ describe("ConfigAgentPlugin.Plugin", () => {
     }),
   )
 
+  it.effect("maps configured fallback models from current and legacy config", () =>
+    Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+      const config = Config.Service.of({
+        entries: () =>
+          Effect.succeed([
+            new Config.Document({
+              type: "document",
+              info: decode({
+                agents: {
+                  build: { model: "anthropic/claude-sonnet", fallback: ["openai/gpt-5", "openrouter/openai/gpt-5"] },
+                },
+              }),
+            }),
+            new Config.Document({
+              type: "document",
+              info: decode(ConfigMigrateV1.migrate({ agent: { plan: { fallback: ["openai/gpt-5-mini"] } } })),
+            }),
+          ]),
+      })
+
+      yield* ConfigAgentPlugin.Plugin.effect(host({ agent: agentHost(agents) })).pipe(
+        Effect.provideService(Config.Service, config),
+      )
+
+      expect((yield* agents.get(AgentV2.ID.make("build")))?.fallback).toMatchObject([
+        { providerID: "openai", id: "gpt-5" },
+        { providerID: "openrouter", id: "openai/gpt-5" },
+      ])
+      expect((yield* agents.get(AgentV2.ID.make("plan")))?.fallback).toMatchObject([
+        { providerID: "openai", id: "gpt-5-mini" },
+      ])
+    }),
+  )
+
   it.effect("removes a built-in agent disabled by configuration", () =>
     Effect.gen(function* () {
       const agents = yield* AgentV2.Service

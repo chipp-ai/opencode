@@ -29,10 +29,12 @@ import { SessionCompaction } from "../compaction"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
 import { SessionInput } from "../input"
+import { SessionMessage } from "../message"
 import { SessionSchema } from "../schema"
 import { SessionStore } from "../store"
 import { type RunError, Service } from "./index"
 import { SessionRunnerModel } from "./model"
+import { SessionRunnerFallback } from "./fallback"
 import { createLLMEventPublisher } from "./publish-llm-event"
 import { toLLMMessages } from "./to-llm-message"
 import { SessionRunnerUsage } from "./usage"
@@ -53,7 +55,9 @@ import { llmClient } from "../../effect/app-node-platform"
  *   - [ ] Mark busy, retrying, idle, interrupted, or terminal-failure status durably.
  *   - [ ] Honor interruption and reject stale work after runtime attachment replacement.
  *   - [x] Honor optional agent step limits.
- *   - [ ] Bound provider retries and repeated identical tool calls.
+ *   - [x] Bound provider retries: `RequestExecutor` owns bounded transport retries; the runner fails over once per
+ *     configured agent fallback model when the failure happens before durable assistant output.
+ *   - [ ] Bound repeated identical tool calls.
  *
  * - Runtime context assembly
  *   - Track V1 runtime-context parity canonically in `specs/v2/session.md`.
@@ -155,6 +159,12 @@ const layer = Layer.effect(
       | { readonly _tag: "ContinueAfterCompaction"; readonly step: number }
       // Overflow compaction completed; rebuild once through the path without overflow recovery.
       | { readonly _tag: "ContinueAfterOverflowCompaction"; readonly step: number }
+      // The selected model failed before durable output; rebuild the request for the switched fallback model.
+      | {
+          readonly _tag: "ContinueAfterFallback"
+          readonly step: number
+          readonly tried: ReadonlyArray<ModelV2.Ref>
+        }
 
     class TurnTransitionError extends Error {
       constructor(readonly transition: TurnTransition) {
@@ -165,6 +175,8 @@ const layer = Layer.effect(
     const continueAfterCompaction = (step: number) => new TurnTransitionError({ _tag: "ContinueAfterCompaction", step })
     const continueAfterOverflowCompaction = (step: number) =>
       new TurnTransitionError({ _tag: "ContinueAfterOverflowCompaction", step })
+    const continueAfterFallback = (step: number, tried: ReadonlyArray<ModelV2.Ref>) =>
+      new TurnTransitionError({ _tag: "ContinueAfterFallback", step, tried })
 
     const loadSystemContext = (agent: AgentV2.Selection) =>
       Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
@@ -176,6 +188,7 @@ const layer = Layer.effect(
       promotion: SessionInput.Delivery | undefined,
       step: number,
       recoverOverflow?: typeof compaction.compactAfterOverflow,
+      tried: ReadonlyArray<ModelV2.Ref> = [],
     ) {
       const session = yield* getSession(sessionID)
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
@@ -237,13 +250,24 @@ const layer = Layer.effect(
       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
         withPublication(publisher.publish(event, outputPaths))
       let overflowFailure: ProviderErrorEvent | undefined
+      let fallbackFailure: ProviderErrorEvent | undefined
+      const fallback = agent.info?.fallback ?? []
       const providerStream = llm.stream(request).pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
-            if (overflowFailure || publisher.hasProviderError()) return
+            if (overflowFailure || fallbackFailure || publisher.hasProviderError()) return
             if (LLMEvent.is.providerError(event)) {
               if (isContextOverflowFailure(event) && !publisher.hasAssistantStarted()) {
                 overflowFailure = event
+                return
+              }
+              // Hold back a fallback-eligible error so it does not become durable before failover is decided.
+              if (
+                fallback.length > 0 &&
+                !publisher.hasAssistantStarted() &&
+                SessionRunnerFallback.shouldFallback(event)
+              ) {
+                fallbackFailure = event
                 return
               }
             }
@@ -294,7 +318,39 @@ const layer = Layer.effect(
             (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request })))
           )
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
+          if (
+            fallback.length > 0 &&
+            !(stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) &&
+            !publisher.hasAssistantStarted() &&
+            !publisher.stepSettlement() &&
+            SessionRunnerFallback.shouldFallback(fallbackFailure ?? failure)
+          ) {
+            const current = { id: info.id, providerID: info.providerID }
+            const next = yield* Effect.findFirst(SessionRunnerFallback.candidates(current, fallback, tried), (ref) =>
+              restore(models.resolve({ ...session, model: ref })).pipe(
+                Effect.as(true),
+                Effect.orElseSucceed(() => false),
+              ),
+            )
+            if (Option.isSome(next)) {
+              yield* Effect.logInfo("model fallback", {
+                "session.id": session.id,
+                from: `${current.providerID}/${current.id}`,
+                to: `${next.value.providerID}/${next.value.id}`,
+              })
+              // Record the switch durably through the Session event stream rather than mutating in-memory state,
+              // so attribution, projection, and later turns all observe the model that actually serves the Session.
+              yield* events.publish(SessionEvent.ModelSwitched, {
+                sessionID: session.id,
+                messageID: SessionMessage.ID.create(),
+                timestamp: yield* DateTime.now,
+                model: next.value,
+              })
+              return yield* Effect.die(continueAfterFallback(currentStep, [...tried, current]))
+            }
+          }
           if (overflowFailure) yield* publish(overflowFailure)
+          if (fallbackFailure) yield* publish(fallbackFailure)
           const llmFailure = failure instanceof LLMError ? failure : undefined
           if (llmFailure && !publisher.hasProviderError()) {
             yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
@@ -358,31 +414,42 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
+      tried?: ReadonlyArray<ModelV2.Ref>,
     ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly step: number }, RunError>
 
-    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step).pipe(
+    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, tried) {
+      return yield* runTurnAttempt(sessionID, promotion, step, undefined, tried).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
               return yield* Effect.die("Post-compaction provider attempt cannot recover another overflow")
             yield* Effect.yieldNow
-            return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
+            return yield* runAfterOverflowCompaction(
+              sessionID,
+              undefined,
+              defect.transition.step,
+              defect.transition._tag === "ContinueAfterFallback" ? defect.transition.tried : tried,
+            )
           }),
         ),
       )
     })
 
-    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow).pipe(
+    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, tried) {
+      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow, tried).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             yield* Effect.yieldNow
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
-              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
-            return yield* runTurn(sessionID, undefined, defect.transition.step)
+              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, tried)
+            return yield* runTurn(
+              sessionID,
+              undefined,
+              defect.transition.step,
+              defect.transition._tag === "ContinueAfterFallback" ? defect.transition.tried : tried,
+            )
           }),
         ),
       )

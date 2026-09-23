@@ -264,6 +264,7 @@ function agentInfo(value: AgentV2.Info) {
   return {
     ...value,
     model: value.model && { ...value.model },
+    fallback: value.fallback?.map((ref) => ({ ...ref })),
     request: { headers: { ...value.request.headers }, body: { ...value.request.body } },
     permissions: value.permissions.map((permission) => ({ ...permission })),
   }
