@@ -26,6 +26,7 @@ import { useSDK } from "../../context/sdk"
 import { useRoute } from "../../context/route"
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
+import { useData } from "../../context/data"
 import { useEvent } from "../../context/event"
 import { editorSelectionKey, useEditorContext, type EditorSelection } from "../../context/editor"
 import { normalizePromptContent, openEditor } from "../../editor"
@@ -67,11 +68,14 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
+import { isV2SessionBusy, toV2Prompt, v2SwitchPlan, v2UnavailableMessage } from "../../util/v2-session"
 
 registerOpencodeSpinner()
 
 export type PromptProps = {
   sessionID?: string
+  /** The session at `sessionID` runs on the experimental V2 session API. */
+  v2?: boolean
   visible?: boolean
   disabled?: boolean
   onSubmit?: () => void
@@ -167,10 +171,37 @@ export function Prompt(props: PromptProps) {
   const route = useRoute()
   const project = useProject()
   const sync = useSync()
+  const data = useData()
   const tuiConfig = useTuiConfig()
   const dialog = useDialog()
   const toast = useToast()
-  const status = createMemo(() => sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" })
+  // New sessions start in V2 when the server enables it; existing ones follow the session route's
+  // classification so sessions with legacy history keep the V1 path.
+  const v2 = createMemo(
+    () => sync.data.capabilities.experimentalV2Session && (props.sessionID ? props.v2 === true : true),
+  )
+  const v2TranscriptBusy = createMemo(() => v2() && isV2SessionBusy(data.session.message.list(props.sessionID ?? "")))
+  // A run that fails before its first step (e.g. no usable model) leaves the prompt as the newest
+  // message, so confirm with the process-local drain registry while the transcript looks busy.
+  const [v2Running, setV2Running] = createSignal(true)
+  createEffect(() => {
+    const sessionID = props.sessionID
+    if (!sessionID || !v2TranscriptBusy()) {
+      setV2Running(true)
+      return
+    }
+    const check = () =>
+      sdk.client.v2.session
+        .active()
+        .then((result) => setV2Running(result.data?.data[sessionID] !== undefined))
+        .catch(() => {})
+    const timer = setInterval(check, 1000)
+    onCleanup(() => clearInterval(timer))
+  })
+  const status = createMemo(() => {
+    if (v2()) return v2TranscriptBusy() && v2Running() ? { type: "busy" as const } : { type: "idle" as const }
+    return sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" as const }
+  })
   const history = usePromptHistory()
   const stash = usePromptStash()
   const keymap = useOpencodeKeymap()
@@ -325,7 +356,16 @@ export function Prompt(props: PromptProps) {
   let syncedSessionID: string | undefined
   createEffect(() => {
     const sessionID = props.sessionID
-    const msg = lastUserMessage()
+    // V2 persists the selection on the Session itself rather than on each user message.
+    const info = sessionID && v2() ? data.session.get(sessionID) : undefined
+    const msg = info
+      ? {
+          agent: info.agent ?? "",
+          model: info.model
+            ? { providerID: info.model.providerID, modelID: info.model.id, variant: info.model.variant }
+            : undefined,
+        }
+      : lastUserMessage()
 
     if (sessionID !== syncedSessionID) {
       if (!sessionID || !msg) return
@@ -442,9 +482,9 @@ export function Prompt(props: PromptProps) {
           }, 5000)
 
           if (store.interrupt >= 2) {
-            void sdk.client.session.abort({
-              sessionID: props.sessionID,
-            })
+            void (v2()
+              ? sdk.client.v2.session.interrupt({ sessionID: props.sessionID })
+              : sdk.client.session.abort({ sessionID: props.sessionID }))
             setStore("interrupt", 0)
           }
           dialog.clear()
@@ -544,7 +584,8 @@ export function Prompt(props: PromptProps) {
         category: "Session",
         slashName: "queue",
         slashAliases: ["unqueue"],
-        enabled: Boolean(props.sessionID),
+        // Pending inputs are V2-only; legacy sessions have no V2 row, so the dialog would 404.
+        enabled: Boolean(props.sessionID) && v2(),
         run: () => {
           const sessionID = props.sessionID
           if (!sessionID) return
@@ -945,6 +986,10 @@ export function Prompt(props: PromptProps) {
           desc: "Shell mode",
           group: "Prompt",
           cmd: () => {
+            if (v2()) {
+              toast.show({ message: v2UnavailableMessage("Shell mode"), variant: "warning", duration: 3000 })
+              return
+            }
             setStore("placeholder", randomIndex(shell().length))
             setStore("mode", "shell")
           },
@@ -1099,6 +1144,21 @@ export function Prompt(props: PromptProps) {
       return false
     }
 
+    // Refuse V1-only turn types before a V2 session gets created for them.
+    if (
+      v2() &&
+      (store.mode === "shell" ||
+        (trimmed.startsWith("/") &&
+          sync.data.command.some((x) => x.name === trimmed.split("\n")[0].split(" ")[0].slice(1))))
+    ) {
+      toast.show({
+        message: v2UnavailableMessage(store.mode === "shell" ? "Shell mode" : "Custom slash commands"),
+        variant: "warning",
+        duration: 3000,
+      })
+      return false
+    }
+
     const variant = local.model.variant.current()
     let sessionID = props.sessionID
     let finishMoveProgress = false
@@ -1110,18 +1170,20 @@ export function Prompt(props: PromptProps) {
       if (move.pending() && !directory) return false
       finishMoveProgress = Boolean(move.progress())
 
-      const res = await sdk.client.session.create({
-        directory,
-        workspace: workspaceID,
-        agent: agent.name,
-        model: {
-          providerID: selectedModel.providerID,
-          id: selectedModel.modelID,
-          variant,
-        },
-      })
+      const model = { providerID: selectedModel.providerID, id: selectedModel.modelID, variant }
+      const res = v2()
+        ? await sdk.client.v2.session
+            .create({
+              agent: agent.name,
+              model,
+              location: { directory: directory ?? data.location.default().directory, workspaceID },
+            })
+            .then((result) => ({ id: result.data?.data.id, error: result.error }))
+        : await sdk.client.session
+            .create({ directory, workspace: workspaceID, agent: agent.name, model })
+            .then((result) => ({ id: result.data?.id, error: result.error }))
 
-      if (res.error) {
+      if (!res.id) {
         if (finishMoveProgress) move.finishSubmit()
         console.log("Creating a session failed:", res.error)
 
@@ -1133,7 +1195,7 @@ export function Prompt(props: PromptProps) {
         return true
       }
 
-      sessionID = res.data.id
+      sessionID = res.id
     }
 
     const inputText = expandTrackedPastedText(
@@ -1169,7 +1231,39 @@ export function Prompt(props: PromptProps) {
           ]
         : []
 
-    if (store.mode === "shell") {
+    if (v2()) {
+      move.startSubmit()
+      const target = sessionID
+      const selected = {
+        agent: agent.name,
+        model: { providerID: selectedModel.providerID, id: selectedModel.modelID, variant },
+      }
+      // V2 persists agent/model on the Session instead of taking them per prompt, so sync any local
+      // change (agent cycle, /model) before admitting the prompt. New sessions were created with them.
+      const plan = v2SwitchPlan(data.session.get(target) ?? selected, selected)
+      // Sequential so the transcript records switches in a stable order; a failed switch skips the prompt.
+      void Promise.resolve(
+        plan.agent && sdk.client.v2.session.switchAgent({ sessionID: target, agent: plan.agent }, { throwOnError: true }),
+      )
+        .then(
+          () =>
+            plan.model &&
+            sdk.client.v2.session.switchModel({ sessionID: target, model: plan.model }, { throwOnError: true }),
+        )
+        .then(() =>
+          sdk.client.v2.session.prompt(
+            { sessionID: target, prompt: toV2Prompt(inputText, nonTextParts) },
+            { throwOnError: true },
+          ),
+        )
+        .catch((error) => {
+          toast.show({
+            title: "Failed to send prompt",
+            message: errorMessage(error),
+            variant: "error",
+          })
+        })
+    } else if (store.mode === "shell") {
       move.startSubmit()
       void sdk.client.session.shell({
         sessionID,

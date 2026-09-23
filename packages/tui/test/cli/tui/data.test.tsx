@@ -636,3 +636,102 @@ test("withdraws and revises pending inputs through the v2 input routes", async (
     app.renderer.destroy()
   }
 })
+
+test("tracks V2 permission and question requests and switch-driven session selection", async () => {
+  const events = createEventSource()
+  const session = {
+    id: "ses_parent",
+    projectID: "proj_test",
+    agent: "build",
+    model: { providerID: "anthropic", id: "claude" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 0, updated: 0 },
+    title: "Parent",
+    location: { directory },
+  }
+  const calls = createFetch((url) => {
+    if (url.pathname === "/api/session/ses_parent") return json({ data: session })
+    if (url.pathname === "/api/session/ses_child")
+      return json({ data: { ...session, id: "ses_child", parentID: "ses_parent" } })
+    return undefined
+  }, events)
+  let data!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    data = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await mounted
+    await data.session.refresh("ses_parent")
+
+    emitEvent(events, {
+      id: "evt_agent",
+      type: "session.next.agent.switched",
+      properties: { sessionID: "ses_parent", messageID: "msg_agent", timestamp: 1, agent: "plan" },
+    } as Event)
+    emitEvent(events, {
+      id: "evt_model",
+      type: "session.next.model.switched",
+      properties: {
+        sessionID: "ses_parent",
+        messageID: "msg_model",
+        timestamp: 2,
+        model: { providerID: "openai", id: "gpt" },
+      },
+    } as Event)
+    await wait(
+      () => data.session.get("ses_parent")?.agent === "plan" && data.session.get("ses_parent")?.model?.id === "gpt",
+    )
+    expect(data.session.get("ses_parent")?.model).toEqual({ providerID: "openai", id: "gpt" })
+
+    // A subagent's request is attributed to its parent once the child session's info loads.
+    emitEvent(events, {
+      id: "evt_perm",
+      type: "permission.v2.asked",
+      properties: { id: "per_1", sessionID: "ses_child", action: "bash", resources: ["ls"] },
+    } as Event)
+    emitEvent(events, {
+      id: "evt_question",
+      type: "question.v2.asked",
+      properties: { id: "que_1", sessionID: "ses_parent", questions: [{ question: "Q", header: "Q", options: [] }] },
+    } as Event)
+    await wait(() => data.session.permission.tree("ses_parent").length === 1)
+    expect(data.session.permission.list("ses_child")?.map((request) => request.id)).toEqual(["per_1"])
+    expect(data.session.question.tree("ses_parent").map((request) => request.id)).toEqual(["que_1"])
+
+    emitEvent(events, {
+      id: "evt_perm_reply",
+      type: "permission.v2.replied",
+      properties: { sessionID: "ses_child", requestID: "per_1", reply: "once" },
+    } as Event)
+    emitEvent(events, {
+      id: "evt_question_reject",
+      type: "question.v2.rejected",
+      properties: { sessionID: "ses_parent", requestID: "que_1" },
+    } as Event)
+    await wait(() => data.session.permission.tree("ses_parent").length === 0)
+    expect(data.session.question.tree("ses_parent")).toEqual([])
+  } finally {
+    app.renderer.destroy()
+  }
+})

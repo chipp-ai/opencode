@@ -129,6 +129,26 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       setStore("session", "input", sessionID, (inputs) => inputs.filter((input) => input.id !== messageID))
     }
 
+    // A snapshot fetched while a step was starting can miss its step.started event; once that step
+    // settles, reload the loaded transcript rather than leaving the turn invisible.
+    function resyncMissingAssistant(sessionID: string, assistantMessageID: string) {
+      const messages = store.session.message[sessionID]
+      if (!messages || messages.some((item) => item.id === assistantMessageID)) return
+      void result.session.message.refresh(sessionID)
+    }
+
+    function removeRequest(kind: "permission" | "question", sessionID: string, requestID: string) {
+      setStore(
+        "session",
+        kind,
+        produce((draft) => {
+          const requests = draft[sessionID]
+          const index = requests?.findIndex((request) => request.id === requestID) ?? -1
+          if (index !== -1) requests.splice(index, 1)
+        }),
+      )
+    }
+
     function handleEvent(event: V2Event) {
       switch (event.type) {
         case "catalog.updated":
@@ -138,6 +158,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           ])
           break
         case "session.next.agent.switched":
+          if (store.session.info[event.data.sessionID])
+            setStore("session", "info", event.data.sessionID, "agent", event.data.agent)
           message.update(event.data.sessionID, (draft) => {
             message.prepend(draft, {
               id: event.data.messageID,
@@ -148,6 +170,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           })
           break
         case "session.next.model.switched":
+          if (store.session.info[event.data.sessionID])
+            setStore("session", "info", event.data.sessionID, "model", event.data.model)
           message.update(event.data.sessionID, (draft) => {
             message.prepend(draft, {
               id: event.data.messageID,
@@ -260,6 +284,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           })
           break
         case "session.next.step.ended":
+          resyncMissingAssistant(event.data.sessionID, event.data.assistantMessageID)
           message.update(event.data.sessionID, (draft) => {
             const currentAssistant = message.assistant(draft, event.data.assistantMessageID)
             if (!currentAssistant) return
@@ -272,6 +297,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           })
           break
         case "session.next.step.failed":
+          resyncMissingAssistant(event.data.sessionID, event.data.assistantMessageID)
           message.update(event.data.sessionID, (draft) => {
             const currentAssistant = message.assistant(draft, event.data.assistantMessageID)
             if (!currentAssistant) return
@@ -427,6 +453,38 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             })
           })
           break
+        case "permission.v2.asked":
+          // Subagent sessions are created server-side; load their info so parents can claim their requests.
+          if (!store.session.info[event.data.sessionID]) void result.session.refresh(event.data.sessionID)
+          setStore(
+            "session",
+            "permission",
+            produce((draft) => {
+              const requests = (draft[event.data.sessionID] ??= [])
+              if (requests.some((request) => request.id === event.data.id)) return
+              requests.push(event.data)
+            }),
+          )
+          break
+        case "permission.v2.replied":
+          removeRequest("permission", event.data.sessionID, event.data.requestID)
+          break
+        case "question.v2.asked":
+          if (!store.session.info[event.data.sessionID]) void result.session.refresh(event.data.sessionID)
+          setStore(
+            "session",
+            "question",
+            produce((draft) => {
+              const requests = (draft[event.data.sessionID] ??= [])
+              if (requests.some((request) => request.id === event.data.id)) return
+              requests.push(event.data)
+            }),
+          )
+          break
+        case "question.v2.replied":
+        case "question.v2.rejected":
+          removeRequest("question", event.data.sessionID, event.data.requestID)
+          break
         case "reference.updated":
           void result.location.reference.refresh()
           break
@@ -465,7 +523,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             return store.session.message[sessionID]
           },
           async refresh(sessionID: string) {
-            const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
+            // Newest-first like the live bridge; 200 is the endpoint's maximum page size.
+            const result = await sdk.client.v2.session.messages({ sessionID, limit: 200 }, { throwOnError: true })
             setStore("session", "message", sessionID, result.data.data)
           },
         },
@@ -507,6 +566,15 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           list(sessionID: string) {
             return store.session.permission[sessionID]
           },
+          /** Pending requests for a session and its direct subagent sessions. */
+          tree(sessionID: string) {
+            return Object.values(store.session.permission)
+              .flat()
+              .filter(
+                (request) =>
+                  request.sessionID === sessionID || store.session.info[request.sessionID]?.parentID === sessionID,
+              )
+          },
           async refresh(sessionID: string) {
             const result = await sdk.client.v2.session.permission.list({ sessionID }, { throwOnError: true })
             setStore("session", "permission", sessionID, result.data.data)
@@ -515,6 +583,15 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
         question: {
           list(sessionID: string) {
             return store.session.question[sessionID]
+          },
+          /** Pending requests for a session and its direct subagent sessions. */
+          tree(sessionID: string) {
+            return Object.values(store.session.question)
+              .flat()
+              .filter(
+                (request) =>
+                  request.sessionID === sessionID || store.session.info[request.sessionID]?.parentID === sessionID,
+              )
           },
           async refresh(sessionID: string) {
             const result = await sdk.client.v2.session.question.list({ sessionID }, { throwOnError: true })

@@ -76,7 +76,7 @@ export async function mockOpenCodeServer(page: Page, config: MockServerConfig) {
       return config.protocol === "v2" ? json(route, {}, undefined, 404) : json(route, { healthy: true })
     if (path === "/api/health" && config.protocol === "v2")
       return json(route, { healthy: true, version: "2.0.0", pid: 1 })
-    if (path === "/experimental/capabilities") return json(route, { backgroundSubagents: true })
+    if (path === "/experimental/capabilities") return json(route, { backgroundSubagents: true, v2Session: false })
     if (path === "/provider")
       return json(route, typeof config.provider === "function" ? config.provider() : config.provider)
     if (path === "/provider/auth") return json(route, config.integrationMethods ?? {})

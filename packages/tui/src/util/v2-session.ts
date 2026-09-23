@@ -1,0 +1,306 @@
+import type {
+  LlmToolContent,
+  Message,
+  ModelRef,
+  Part,
+  PermissionRequest,
+  PermissionV2Request,
+  PromptInput,
+  QuestionRequest,
+  QuestionV2Request,
+  SessionMessage,
+  SessionMessageAssistant,
+  SessionMessageAssistantTool,
+  SessionV2Info,
+  ToolPart,
+  UserMessage,
+} from "@opencode-ai/sdk/v2"
+import type { PromptInfo } from "../prompt/history"
+
+/** Session palette commands that depend on V1-only endpoints or V1 message data, with no V2 path in the TUI yet. */
+export const V2_UNAVAILABLE_COMMANDS = new Set([
+  "session.share",
+  "session.unshare",
+  "session.fork",
+  "session.timeline",
+  "session.compact",
+  "session.undo",
+  "session.redo",
+])
+
+export function v2UnavailableMessage(feature: string) {
+  return `${feature} is not available in V2 mode yet`
+}
+
+/**
+ * Sessions whose history lives in the legacy V1 message tables stay on the V1 view even when V2 mode
+ * is enabled: the V2 runner only reads V2 history, so prompting them through V2 would silently drop
+ * the existing transcript.
+ */
+export function isV2Session(input: { enabled: boolean; legacyMessageCount: number }) {
+  return input.enabled && input.legacyMessageCount === 0
+}
+
+type Selection = Pick<SessionV2Info, "agent" | "model">
+
+/** Agent/model switches needed so the durable V2 Session matches the TUI's current local selection. */
+export function v2SwitchPlan(session: Selection, selected: { agent: string; model: ModelRef }) {
+  return {
+    agent: session.agent === selected.agent ? undefined : selected.agent,
+    model: sameModel(session.model, selected.model) ? undefined : selected.model,
+  }
+}
+
+// Mirrors SessionV2.switchModel's own no-op check, where an omitted variant means "default".
+function sameModel(current: ModelRef | undefined, next: ModelRef) {
+  return (
+    current?.providerID === next.providerID &&
+    current.id === next.id &&
+    (current.variant ?? "default") === (next.variant ?? "default")
+  )
+}
+
+/**
+ * V2 has no durable busy/idle status yet, so infer it from the newest-first projected transcript:
+ * a promoted prompt still awaiting its first step, or an unfinished step. The short gap between a
+ * tool-calls step ending and the continuation step starting reads as idle; treating "tool-calls" as
+ * busy instead would stick forever when a run is interrupted after its tools settle.
+ */
+export function isV2SessionBusy(messages: SessionMessage[] = []) {
+  const latest = messages.find((message) => message.type === "user" || message.type === "assistant")
+  if (!latest) return false
+  if (latest.type === "user") return true
+  return !latest.time.completed
+}
+
+export function toV2Prompt(text: string, parts: PromptInfo["parts"]): PromptInput {
+  const files = parts.flatMap((part) =>
+    part.type === "file"
+      ? [
+          {
+            uri: part.url,
+            name: part.filename,
+            source: part.source
+              ? { start: part.source.text.start, end: part.source.text.end, text: part.source.text.value }
+              : undefined,
+          },
+        ]
+      : [],
+  )
+  const agents = parts.flatMap((part) =>
+    part.type === "agent"
+      ? [
+          {
+            name: part.name,
+            source: part.source ? { start: part.source.start, end: part.source.end, text: part.source.value } : undefined,
+          },
+        ]
+      : [],
+  )
+  return {
+    text,
+    files: files.length > 0 ? files : undefined,
+    agents: agents.length > 0 ? agents : undefined,
+  }
+}
+
+export function toV1Permission(request: PermissionV2Request): PermissionRequest {
+  return {
+    id: request.id,
+    sessionID: request.sessionID,
+    permission: request.action,
+    patterns: request.resources,
+    metadata: request.metadata ?? {},
+    always: request.save ?? [],
+    tool: request.source ? { messageID: request.source.messageID, callID: request.source.callID } : undefined,
+  }
+}
+
+export function toV1Question(request: QuestionV2Request): QuestionRequest {
+  return { id: request.id, sessionID: request.sessionID, questions: request.questions, tool: request.tool }
+}
+
+/**
+ * Project a V2 transcript into the V1 message/part shapes the existing session renderers consume.
+ * `messages` is newest-first, matching both `context/data.tsx` and the V2 messages endpoint. `agent`
+ * and `model` seed the selection for user messages that precede any recorded switch or step.
+ */
+export function toV1Transcript(input: {
+  sessionID: string
+  directory: string
+  messages: SessionMessage[]
+  agent?: string
+  model?: ModelRef
+}) {
+  const selection: { agent: string; model?: ModelRef; parentID: string } = {
+    agent: input.agent ?? "",
+    model: input.model,
+    parentID: "",
+  }
+  const entries = input.messages.toReversed().flatMap((message): { info: Message; parts: Part[] }[] => {
+    if (message.type === "agent-switched") {
+      selection.agent = message.agent
+      return []
+    }
+    if (message.type === "model-switched") {
+      selection.model = message.model
+      return []
+    }
+    if (message.type === "assistant") {
+      selection.agent = message.agent
+      selection.model = message.model
+      return [assistantEntry(input, message, selection.parentID)]
+    }
+    if (message.type === "user") {
+      selection.parentID = message.id
+      const base = { sessionID: input.sessionID, messageID: message.id }
+      return [
+        {
+          info: userInfo(input.sessionID, message.id, message.time.created, selection),
+          parts: [
+            { ...base, id: `${message.id}-text`, type: "text", text: message.text },
+            ...(message.files ?? []).map((file, index) => ({
+              ...base,
+              id: `${message.id}-file-${index}`,
+              type: "file" as const,
+              mime: file.mime,
+              filename: file.name,
+              url: file.uri,
+            })),
+            ...(message.agents ?? []).map((agent, index) => ({
+              ...base,
+              id: `${message.id}-agent-${index}`,
+              type: "agent" as const,
+              name: agent.name,
+              source: agent.source
+                ? { value: agent.source.text, start: agent.source.start, end: agent.source.end }
+                : undefined,
+            })),
+          ],
+        },
+      ]
+    }
+    if (message.type === "compaction")
+      return [
+        {
+          info: userInfo(input.sessionID, message.id, message.time.created, selection),
+          parts: [
+            {
+              sessionID: input.sessionID,
+              messageID: message.id,
+              id: `${message.id}-compaction`,
+              type: "compaction",
+              auto: message.reason === "auto",
+            },
+          ],
+        },
+      ]
+    // System context, synthetic reminders, and shell turns have no V1 transcript representation.
+    return []
+  })
+  return {
+    messages: entries.map((entry) => entry.info),
+    parts: Object.fromEntries(entries.map((entry) => [entry.info.id, entry.parts])),
+  }
+}
+
+function userInfo(
+  sessionID: string,
+  id: string,
+  created: number,
+  selection: { agent: string; model?: ModelRef },
+): UserMessage {
+  return {
+    id,
+    sessionID,
+    role: "user",
+    time: { created },
+    agent: selection.agent,
+    model: {
+      providerID: selection.model?.providerID ?? "",
+      modelID: selection.model?.id ?? "",
+      variant: selection.model?.variant,
+    },
+  }
+}
+
+function assistantEntry(
+  input: { sessionID: string; directory: string },
+  message: SessionMessageAssistant,
+  parentID: string,
+) {
+  const base = { sessionID: input.sessionID, messageID: message.id }
+  const info: Message = {
+    id: message.id,
+    sessionID: input.sessionID,
+    role: "assistant",
+    time: { created: message.time.created, completed: message.time.completed },
+    parentID,
+    modelID: message.model.id,
+    providerID: message.model.providerID,
+    variant: message.model.variant,
+    mode: message.agent,
+    agent: message.agent,
+    path: { cwd: input.directory, root: input.directory },
+    cost: message.cost ?? 0,
+    tokens: message.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    finish: message.finish,
+    error: message.error ? { name: "UnknownError", data: { message: message.error.message } } : undefined,
+  }
+  const parts = message.content.map((item, index): Part => {
+    if (item.type === "text") return { ...base, id: `${message.id}-${item.id}`, type: "text", text: item.text }
+    if (item.type === "tool") return toolPart(base, item)
+    // Reasoning has no explicit end event in the live bridge; later content or a finished step ends it.
+    const ended = index < message.content.length - 1 || message.time.completed !== undefined
+    return {
+      ...base,
+      id: `${message.id}-${item.id}`,
+      type: "reasoning",
+      text: item.text,
+      metadata: item.providerMetadata,
+      time: {
+        start: item.time?.created ?? message.time.created,
+        end: item.time?.completed ?? (ended ? (message.time.completed ?? message.time.created) : undefined),
+      },
+    }
+  })
+  return { info, parts }
+}
+
+function toolPart(base: { sessionID: string; messageID: string }, tool: SessionMessageAssistantTool): ToolPart {
+  const shared = { ...base, id: `${base.messageID}-${tool.id}`, type: "tool" as const, callID: tool.id, tool: tool.name }
+  const state = tool.state
+  if (state.status === "pending") return { ...shared, state: { status: "pending", input: {}, raw: state.input } }
+  const start = tool.time.ran ?? tool.time.created
+  const input = toolInput(state.input)
+  const metadata = toolMetadata(state.structured, state.content)
+  if (state.status === "running") return { ...shared, state: { status: "running", input, metadata, time: { start } } }
+  const time = { start, end: tool.time.completed ?? start }
+  if (state.status === "error")
+    return { ...shared, state: { status: "error", input, error: state.error.message, metadata, time } }
+  return { ...shared, state: { status: "completed", input, output: metadata.output, title: "", metadata, time } }
+}
+
+// V2 file tools name their target `path`; the shared V1 renderers read `filePath`.
+function toolInput(input: Record<string, unknown>) {
+  if (input.filePath !== undefined || typeof input.path !== "string") return input
+  return { ...input, filePath: input.path }
+}
+
+// The shared V1 renderers read tool results from metadata keys that V2 spreads across the
+// model-facing `content` and the tool's `structured` output.
+function toolMetadata(structured: Record<string, unknown>, content: LlmToolContent[]) {
+  const patches = Array.isArray(structured.files)
+    ? structured.files.flatMap((file) =>
+        typeof file === "object" && file !== null && "patch" in file && typeof file.patch === "string"
+          ? [file.patch]
+          : [],
+      )
+    : []
+  return {
+    ...structured,
+    output: content.flatMap((item) => (item.type === "text" ? [item.text] : [])).join("\n"),
+    sessionId: typeof structured.sessionID === "string" ? structured.sessionID : undefined,
+    diff: patches.length > 0 ? patches.join("\n") : undefined,
+  }
+}

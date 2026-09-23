@@ -143,8 +143,9 @@ describe("experimental HttpApi", () => {
       Effect.gen(function* () {
         const tmp = yield* TestInstance
         const directory = tmp.directory
-        const [consoleState, consoleOrgs, toolList, toolIDs, worktrees, resources] = yield* Effect.all(
+        const [capabilities, consoleState, consoleOrgs, toolList, toolIDs, worktrees, resources] = yield* Effect.all(
           [
+            request(ExperimentalPaths.capabilities, directory),
             request(ExperimentalPaths.console, directory),
             request(ExperimentalPaths.consoleOrgs, directory),
             request(`${ExperimentalPaths.tool}?provider=opencode&model=gpt-5`, directory),
@@ -154,6 +155,10 @@ describe("experimental HttpApi", () => {
           ],
           { concurrency: "unbounded" },
         )
+
+        // Experimental session modes stay off unless explicitly enabled, so clients default to V1.
+        expect(capabilities.status).toBe(200)
+        expect(yield* json(capabilities)).toMatchObject({ v2Session: false })
 
         expect(consoleState.status).toBe(200)
         expect(yield* json(consoleState)).toEqual({

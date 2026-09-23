@@ -75,6 +75,7 @@ export const {
       console_state: ConsoleState
       capabilities: {
         experimentalBackgroundSubagents: boolean
+        experimentalV2Session: boolean
       }
       provider_auth: Record<string, ProviderAuthMethod[]>
       agent: Agent[]
@@ -120,6 +121,7 @@ export const {
       console_state: emptyConsoleState,
       capabilities: {
         experimentalBackgroundSubagents: false,
+        experimentalV2Session: false,
       },
       provider_auth: {},
       config: {},
@@ -507,6 +509,7 @@ export const {
               setStore("provider_default", reconcile(providers.default))
               setStore("provider_next", reconcile(providerList))
               setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
+              setStore("capabilities", "experimentalV2Session", capabilities?.v2Session === true)
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))

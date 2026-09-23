@@ -581,6 +581,7 @@ const scenarios: Scenario[] = [
   http.protected.get("/experimental/capabilities", "experimental.capabilities.get").json(200, (body) => {
     check(typeof body === "object" && body !== null, "capabilities should be an object")
     check("backgroundSubagents" in body, "capabilities should report background subagents")
+    check("v2Session" in body, "capabilities should report V2 session mode")
   }),
   http.protected
     .post("/experimental/session/{sessionID}/background", "experimental.session.background")

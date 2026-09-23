@@ -2158,6 +2158,7 @@ export type Provider = {
 
 export type ExperimentalCapabilities = {
   backgroundSubagents: boolean
+  v2Session: boolean
 }
 
 export type ConsoleState = {

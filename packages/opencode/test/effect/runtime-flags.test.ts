@@ -218,6 +218,34 @@ describe("RuntimeFlags", () => {
     }),
   )
 
+  it.effect("experimentalV2Session defaults to false", () =>
+    Effect.gen(function* () {
+      const flags = yield* readFlags.pipe(Effect.provide(fromConfig({})))
+
+      expect(flags.experimentalV2Session).toBe(false)
+    }),
+  )
+
+  it.effect("experimentalV2Session reads OPENCODE_EXPERIMENTAL_V2_SESSION", () =>
+    Effect.gen(function* () {
+      const flags = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL_V2_SESSION: "true" })))
+
+      expect(flags.experimentalV2Session).toBe(true)
+    }),
+  )
+
+  it.effect("experimentalV2Session inherits OPENCODE_EXPERIMENTAL and can be opted out", () =>
+    Effect.gen(function* () {
+      const umbrella = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true" })))
+      const optedOut = yield* readFlags.pipe(
+        Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true", OPENCODE_EXPERIMENTAL_V2_SESSION: "false" })),
+      )
+
+      expect(umbrella.experimentalV2Session).toBe(true)
+      expect(optedOut.experimentalV2Session).toBe(false)
+    }),
+  )
+
   it.effect("experimentalOxfmt defaults to false", () =>
     Effect.gen(function* () {
       const flags = yield* readFlags.pipe(Effect.provide(fromConfig({})))

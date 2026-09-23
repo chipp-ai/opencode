@@ -19,6 +19,8 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
+import { useData } from "../../context/data"
+import { usePermission } from "../../context/permission"
 import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
@@ -28,8 +30,10 @@ import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, 
 import { Prompt, type PromptRef } from "../../component/prompt"
 import type {
   AssistantMessage,
+  Message,
   Part,
   Provider,
+  SessionMessage,
   ToolPart,
   UserMessage,
   TextPart,
@@ -82,7 +86,15 @@ import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { usePathFormatter } from "../../context/path-format"
 import { LocationProvider } from "../../context/location"
-import { createStore } from "solid-js/store"
+import { createStore, reconcile } from "solid-js/store"
+import {
+  isV2Session,
+  toV1Permission,
+  toV1Question,
+  toV1Transcript,
+  V2_UNAVAILABLE_COMMANDS,
+  v2UnavailableMessage,
+} from "../../util/v2-session"
 import { errorTarget, findMatches, highlightSegments, stepIndex } from "../../util/session-find"
 import { SessionFindBar } from "./find"
 
@@ -182,6 +194,7 @@ const context = createContext<{
   findQuery: () => string
   findMark: (id: string) => FindMark
   providers: () => ReadonlyMap<string, Provider>
+  messages: () => Message[]
   sync: ReturnType<typeof useSync>
   tui: ReturnType<typeof useTuiConfig>
 }>()
@@ -227,7 +240,34 @@ export function Session() {
       .filter((x) => x.parentID === parentID || x.id === parentID)
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
-  const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+  const data = useData()
+  // Set once the loaded Session is known to live in V2 history (see isV2Session for the legacy fallback).
+  const [v2SessionID, setV2SessionID] = createSignal<string>()
+  const v2 = createMemo(() => v2SessionID() === route.sessionID)
+  // The shared renderers take V1 message/part shapes, so project the V2 bridge's transcript into a store
+  // and reconcile by id to keep row identity (and per-row UI state) stable across streaming updates.
+  const [v2Transcript, setV2Transcript] = createStore<{ messages: Message[]; parts: Record<string, Part[]> }>({
+    messages: [],
+    parts: {},
+  })
+  createEffect(() => {
+    if (!v2()) return
+    // The JSON round-trip reads every nested field through the store proxy, so streaming deltas retrigger
+    // this effect, and it detaches the copy so reconcile never shares nodes with the data store.
+    const source: SessionMessage[] = JSON.parse(JSON.stringify(data.session.message.list(route.sessionID) ?? []))
+    const info = data.session.get(route.sessionID)
+    const transcript = toV1Transcript({
+      sessionID: route.sessionID,
+      directory: session()?.directory ?? "",
+      messages: source,
+      agent: info?.agent,
+      model: info?.model ? { ...info.model } : undefined,
+    })
+    setV2Transcript("messages", reconcile(transcript.messages))
+    setV2Transcript("parts", reconcile(transcript.parts))
+  })
+  const messages = createMemo(() => (v2() ? v2Transcript.messages : (sync.data.message[route.sessionID] ?? [])))
+  const partsFor = (messageID: string) => (v2() ? v2Transcript.parts[messageID] : sync.data.part[messageID]) ?? []
   const messagesBeforeRevert = () => {
     const messageID = session()?.revert?.messageID
     if (!messageID) return messages()
@@ -235,9 +275,9 @@ export function Session() {
     return index === -1 ? messages() : messages().slice(0, index)
   }
   const foregroundTasks = createMemo(() =>
-    sync.data.capabilities.experimentalBackgroundSubagents
+    sync.data.capabilities.experimentalBackgroundSubagents && !v2()
       ? messages().flatMap((message) =>
-          (sync.data.part[message.id] ?? []).filter(
+          partsFor(message.id).filter(
             (part): part is ToolPart =>
               part.type === "tool" &&
               part.tool === "task" &&
@@ -249,10 +289,12 @@ export function Session() {
   )
   const permissions = createMemo(() => {
     if (session()?.parentID) return []
+    if (v2()) return data.session.permission.tree(route.sessionID).map(toV1Permission)
     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
   })
   const questions = createMemo(() => {
     if (session()?.parentID) return []
+    if (v2()) return data.session.question.tree(route.sessionID).map(toV1Question)
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
   const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
@@ -301,6 +343,18 @@ export function Session() {
   const sdk = useSDK()
   const editor = useEditorContext()
 
+  // Mirrors the legacy sync store's `--auto` approval, which only sees V1 permission events.
+  const permissionMode = usePermission()
+  const autoApproved = new Set<string>()
+  createEffect(() => {
+    if (!v2() || permissionMode.mode !== "auto") return
+    for (const request of permissions()) {
+      if (autoApproved.has(request.id)) continue
+      autoApproved.add(request.id)
+      void sdk.client.v2.session.permission.reply({ sessionID: request.sessionID, requestID: request.id, reply: "once" })
+    }
+  })
+
   createEffect(() => {
     const sessionID = route.sessionID
     void (async () => {
@@ -329,6 +383,20 @@ export function Session() {
       }
       editor.reconnect(result.data.directory)
       await sync.session.sync(sessionID)
+      if (
+        isV2Session({
+          enabled: sync.data.capabilities.experimentalV2Session,
+          legacyMessageCount: sync.data.message[sessionID]?.length ?? 0,
+        })
+      ) {
+        await Promise.all([
+          data.session.refresh(sessionID),
+          data.session.message.refresh(sessionID),
+          data.session.permission.refresh(sessionID),
+          data.session.question.refresh(sessionID),
+        ])
+        setV2SessionID(sessionID)
+      }
       if (route.sessionID === sessionID && scroll) scroll.scrollBy(100_000)
     })().catch((error) => {
       if (route.sessionID !== sessionID) return
@@ -406,7 +474,7 @@ export function Session() {
         if (!message) return false
 
         // Check if message has valid non-synthetic, non-ignored text parts
-        const parts = sync.data.part[message.id]
+        const parts = partsFor(message.id)
         if (!parts || !Array.isArray(parts)) return false
 
         return parts.some((part) => part && part.type === "text" && !part.synthetic && !part.ignored)
@@ -452,7 +520,7 @@ export function Session() {
     if (!find.open) return []
     return findMatches({
       messages: messagesBeforeRevert(),
-      parts: (messageID) => sync.data.part[messageID] ?? [],
+      parts: partsFor,
       query: find.query,
     }).toReversed()
   })
@@ -894,15 +962,15 @@ export function Session() {
       category: "Session",
       hidden: true,
       run: () => {
-        const messages = sync.data.message[route.sessionID]
-        if (!messages || !messages.length) return
+        const list = messages()
+        if (!list.length) return
 
         // Find the most recent user message with non-ignored, non-synthetic text parts
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const message = messages[i]
+        for (let i = list.length - 1; i >= 0; i--) {
+          const message = list[i]
           if (!message || message.role !== "user") continue
 
-          const parts = sync.data.part[message.id]
+          const parts = partsFor(message.id)
           if (!parts || !Array.isArray(parts)) continue
 
           const hasValidTextPart = parts.some(
@@ -945,7 +1013,7 @@ export function Session() {
           return
         }
 
-        const parts = sync.data.part[lastAssistantMessage.id] ?? []
+        const parts = partsFor(lastAssistantMessage.id)
         const textParts = parts.filter((part) => part.type === "text")
         if (textParts.length === 0) {
           toast.show({ message: "No text parts found in last assistant message", variant: "error" })
@@ -987,7 +1055,7 @@ export function Session() {
           const sessionMessages = messages()
           const transcript = formatTranscript(
             sessionData,
-            sessionMessages.map((msg) => ({ info: msg, parts: sync.data.part[msg.id] ?? [] })),
+            sessionMessages.map((msg) => ({ info: msg, parts: partsFor(msg.id) })),
             {
               thinking: showThinking(),
               toolDetails: showDetails(),
@@ -1031,7 +1099,7 @@ export function Session() {
 
           const transcript = formatTranscript(
             sessionData,
-            sessionMessages.map((msg) => ({ info: msg, parts: sync.data.part[msg.id] ?? [] })),
+            sessionMessages.map((msg) => ({ info: msg, parts: partsFor(msg.id) })),
             {
               thinking: options.thinking,
               toolDetails: options.toolDetails,
@@ -1151,6 +1219,15 @@ export function Session() {
       slashName: "slash" in command ? command.slash?.name : undefined,
       slashAliases: "slash" in command ? command.slash?.aliases : undefined,
       ...command,
+      // These depend on V1-only endpoints or V1 message data; explain instead of failing silently.
+      ...(v2() && V2_UNAVAILABLE_COMMANDS.has(command.value)
+        ? {
+            run: () => {
+              dialog.clear()
+              toast.show({ message: v2UnavailableMessage(command.title), variant: "warning", duration: 3000 })
+            },
+          }
+        : {}),
     })),
   )
 
@@ -1235,6 +1312,7 @@ export function Session() {
             if (findTargets().has(id)) return "match"
           },
           providers,
+          messages,
           sync,
           tui: tuiConfig,
         }}
@@ -1334,6 +1412,14 @@ export function Session() {
                           index={index()}
                           onMouseUp={() => {
                             if (renderer.getSelection()?.getSelectedText()) return
+                            if (v2()) {
+                              toast.show({
+                                message: v2UnavailableMessage("Message actions"),
+                                variant: "warning",
+                                duration: 3000,
+                              })
+                              return
+                            }
                             dialog.replace(() => (
                               <DialogMessage
                                 messageID={message.id}
@@ -1343,7 +1429,7 @@ export function Session() {
                             ))
                           }}
                           message={message as UserMessage}
-                          parts={sync.data.part[message.id] ?? []}
+                          parts={partsFor(message.id)}
                           pending={pending()}
                         />
                       </Match>
@@ -1351,7 +1437,7 @@ export function Session() {
                         <AssistantMessage
                           last={lastAssistant()?.id === message.id}
                           message={message as AssistantMessage}
-                          parts={sync.data.part[message.id] ?? []}
+                          parts={partsFor(message.id)}
                         />
                       </Match>
                     </Switch>
@@ -1363,12 +1449,15 @@ export function Session() {
                   <PermissionPrompt
                     request={permissions()[0]}
                     directory={sync.session.get(permissions()[0].sessionID)?.directory}
+                    v2={v2()}
+                    parts={v2() ? partsFor : undefined}
                   />
                 </Show>
                 <Show when={permissions().length === 0 && questions().length > 0}>
                   <QuestionPrompt
                     request={questions()[0]}
                     directory={sync.session.get(questions()[0].sessionID)?.directory}
+                    v2={v2()}
                   />
                 </Show>
                 <Show when={session()?.parentID}>
@@ -1406,6 +1495,7 @@ export function Session() {
                         toBottom()
                       }}
                       sessionID={route.sessionID}
+                      v2={v2()}
                       right={<pluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />}
                     />
                   </pluginRuntime.Slot>
@@ -1569,7 +1659,6 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const local = useLocal()
   const { theme } = useTheme()
   const sync = useSync()
-  const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
   const model = createMemo(() => Model.name(ctx.providers(), props.message.providerID, props.message.modelID))
 
   const final = createMemo(() => {
@@ -1579,7 +1668,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const duration = createMemo(() => {
     if (!final()) return 0
     if (!props.message.time.completed) return 0
-    const user = messages().find((x) => x.role === "user" && x.id === props.message.parentID)
+    const user = ctx.messages().find((x) => x.role === "user" && x.id === props.message.parentID)
     if (!user || !user.time) return 0
     return props.message.time.completed - user.time.created
   })

@@ -4,7 +4,7 @@ import { createMemo, For, Match, Show, Switch } from "solid-js"
 import { Portal, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { TextareaRenderable } from "@opentui/core"
 import { useTheme, selectedForeground } from "../../context/theme"
-import type { PermissionRequest } from "@opencode-ai/sdk/v2"
+import type { Part, PermissionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
 import { SplitBorder } from "../../ui/border"
 import { useSync } from "../../context/sync"
@@ -108,7 +108,14 @@ function TextBody(props: { title: string; description?: string; icon?: string })
   )
 }
 
-export function PermissionPrompt(props: { request: PermissionRequest; directory?: string }) {
+export function PermissionPrompt(props: {
+  request: PermissionRequest
+  directory?: string
+  /** Reply through the V2 session permission endpoint instead of the legacy one. */
+  v2?: boolean
+  /** Tool parts to read the pending call's input from, when not held by the legacy sync store. */
+  parts?: (messageID: string) => Part[]
+}) {
   const sdk = useSDK()
   const project = useProject()
   const sync = useSync()
@@ -119,10 +126,29 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
 
   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
 
+  function reply(value: "once" | "always" | "reject", message?: string) {
+    if (props.v2) {
+      void sdk.client.v2.session.permission.reply({
+        sessionID: props.request.sessionID,
+        requestID: props.request.id,
+        reply: value,
+        message,
+      })
+      return
+    }
+    void sdk.client.permission.reply({
+      reply: value,
+      requestID: props.request.id,
+      directory: props.directory,
+      message,
+      workspace: project.workspace.current(),
+    })
+  }
+
   const input = createMemo(() => {
     const tool = props.request.tool
     if (!tool) return {}
-    const parts = sync.data.part[tool.messageID] ?? []
+    const parts = props.parts?.(tool.messageID) ?? sync.data.part[tool.messageID] ?? []
     for (const part of parts) {
       if (part.type === "tool" && part.callID === tool.callID && part.state.status !== "pending") {
         return part.state.input ?? {}
@@ -165,25 +191,14 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
           onSelect={(option) => {
             setStore("stage", "permission")
             if (option === "cancel") return
-            void sdk.client.permission.reply({
-              reply: "always",
-              requestID: props.request.id,
-              directory: props.directory,
-              workspace: project.workspace.current(),
-            })
+            reply("always")
           }}
         />
       </Match>
       <Match when={store.stage === "reject"}>
         <RejectPrompt
           onConfirm={(message) => {
-            void sdk.client.permission.reply({
-              reply: "reject",
-              requestID: props.request.id,
-              directory: props.directory,
-              message: message || undefined,
-              workspace: project.workspace.current(),
-            })
+            reply("reject", message || undefined)
           }}
           onCancel={() => {
             setStore("stage", "permission")
@@ -415,20 +430,10 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                     setStore("stage", "reject")
                     return
                   }
-                  void sdk.client.permission.reply({
-                    reply: "reject",
-                    requestID: props.request.id,
-                    directory: props.directory,
-                    workspace: project.workspace.current(),
-                  })
+                  reply("reject")
                   return
                 }
-                void sdk.client.permission.reply({
-                  reply: "once",
-                  requestID: props.request.id,
-                  directory: props.directory,
-                  workspace: project.workspace.current(),
-                })
+                reply("once")
               }}
             />
           )
