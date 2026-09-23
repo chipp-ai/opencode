@@ -1,0 +1,29 @@
+Run a long-lived command in the background and get notified when it emits new stdout lines. The tool returns immediately after arming the monitor; matching stdout lines are batched (~200ms) and delivered to this session as new messages, and a final message is delivered when the command exits on its own. Use this for watching files, logs, processes, or any event source that produces one line per event.
+
+IMPORTANT:
+- The command should keep running and emit ONE line per NEW event. A command that exits immediately just produces its output plus an exit notification.
+- Emit only on a real change. Never re-print content that has not changed — a loop that re-runs `tail -N` or `cat` re-emits the same lines every cycle, so you get the same lines flooding back forever as bogus events. Prefer a streaming watcher that emits each new line exactly once.
+- `pattern` (optional) is a JavaScript regular expression; only lines matching it are delivered. Use it to watch for a specific condition without writing a grep pipeline.
+- `once: true` stops the monitor (and kills the command) after the first delivered line. Use it for "tell me when X happens" watches.
+- Multiple monitors can run CONCURRENTLY in one session: each distinct `description` is its own watch. Arming a monitor with the SAME `description` REPLACES (cancels) just that one. To fix a wrong command, re-arm with the IDENTICAL description, otherwise the original keeps running.
+- TO STOP A WATCH, use `monitor_stop` with the monitor's id (returned when armed) or its exact description. `tail -F` does NOT exit on a missing path — it retries forever — so a wrong-path watch lingers until you stop it.
+- TO SEE WHAT'S RUNNING, use `monitor_list`.
+- FLOOD GUARD: a monitor that delivers more than ~5000 lines is auto-stopped with a final "[flood guard]" message. Very long lines are truncated. Keep filters tight.
+- Monitors live only as long as this opencode process: they are NOT persisted and do not survive a restart. Interrupting the session or deleting it also stops its monitors.
+
+COVERAGE — silence is not success:
+- When watching a job for an outcome, your filter must match EVERY terminal state, not just the happy path. A monitor that matches only the success marker stays silent through a crash — and silence looks exactly like "still running".
+  - Wrong (silent on crash): pattern `step=`
+  - Right: pattern `step=|Traceback|Error|FAILED|Killed|OOM`
+
+STREAMS & BUFFERING:
+- Only stdout becomes events; stderr is discarded. For a command you run directly, merge stderr in: `python train.py 2>&1`.
+- Every pipe stage must flush per line or matches sit unseen in its buffer: `grep` needs `--line-buffered`, `awk` needs `fflush()`. Avoid `| head -N`.
+- In poll loops, swallow transient failures (`curl ... || true`) so one bad request doesn't kill the monitor.
+
+PATTERNS:
+- File changes: prefer `tail -F PATH` (follows forever, emits each new line once).
+- Periodic check: poll in a loop and print only when something changed or a condition holds, e.g. `while :; do curl -fsS URL >/dev/null || echo "down at $(date)"; sleep 60; done`. Poll intervals: 30s+ for remote APIs, 0.5–1s for local checks.
+- FINITE job: poll and EXIT the loop on a terminal state so the monitor ends instead of polling forever:
+  `while :; do line=$(grep -E 'DONE|FAILED' PATH | tail -1); [ -n "$line" ] && { echo "$line"; break; }; sleep 5; done`
+- Wait for a process to finish: `while kill -0 PID 2>/dev/null; do sleep 2; done; echo "process PID exited"`
