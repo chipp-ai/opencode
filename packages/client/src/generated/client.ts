@@ -114,6 +114,12 @@ import type {
   ProjectCopiesRemoveOutput,
   ProjectCopiesRefreshInput,
   ProjectCopiesRefreshOutput,
+  WorkflowsListInput,
+  WorkflowsListOutput,
+  WorkflowsRunInput,
+  WorkflowsRunOutput,
+  WorkflowsGetInput,
+  WorkflowsGetOutput,
 } from "./types"
 import { ClientError } from "./client-error"
 
@@ -996,6 +1002,45 @@ export function make(options: ClientOptions) {
             successStatus: 204,
             declaredStatuses: [400, 401],
             empty: true,
+          },
+          requestOptions,
+        ),
+    },
+    workflows: {
+      list: (input?: WorkflowsListInput, requestOptions?: RequestOptions) =>
+        request<WorkflowsListOutput>(
+          {
+            method: "GET",
+            path: `/api/workflow`,
+            query: { location: input?.["location"] },
+            successStatus: 200,
+            declaredStatuses: [401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      run: (input: WorkflowsRunInput, requestOptions?: RequestOptions) =>
+        request<WorkflowsRunOutput>(
+          {
+            method: "POST",
+            path: `/api/workflow/${encodeURIComponent(input.id)}/run`,
+            query: { location: input["location"] },
+            body: { args: input["args"], budgetUsd: input["budgetUsd"], resumeFromRunId: input["resumeFromRunId"] },
+            successStatus: 200,
+            declaredStatuses: [404, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      get: (input: WorkflowsGetInput, requestOptions?: RequestOptions) =>
+        request<WorkflowsGetOutput>(
+          {
+            method: "GET",
+            path: `/api/workflow/run/${encodeURIComponent(input.runID)}`,
+            query: { location: input["location"] },
+            successStatus: 200,
+            declaredStatuses: [404, 401, 400],
+            empty: false,
           },
           requestOptions,
         ),

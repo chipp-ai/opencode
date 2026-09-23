@@ -2960,6 +2960,18 @@ export type ProjectCopyError = {
   }
 }
 
+export type WorkflowNotFoundError = {
+  _tag: "WorkflowNotFoundError"
+  workflowID: string
+  message: string
+}
+
+export type WorkflowRunNotFoundError = {
+  _tag: "WorkflowRunNotFoundError"
+  runID: string
+  message: string
+}
+
 export type EffectHttpApiErrorForbidden = {
   _tag: "Forbidden"
 }
@@ -3905,6 +3917,16 @@ export type AgentV2Info = {
   permissions: PermissionV2Ruleset
 }
 
+export type SessionTokens = {
+  input: number
+  output: number
+  reasoning: number
+  cache: {
+    read: number
+    write: number
+  }
+}
+
 export type SessionV2Info = {
   id: string
   parentID?: string
@@ -3912,15 +3934,7 @@ export type SessionV2Info = {
   agent?: string
   model?: ModelRef
   cost: number
-  tokens: {
-    input: number
-    output: number
-    reasoning: number
-    cache: {
-      read: number
-      write: number
-    }
-  }
+  tokens: SessionTokens
   time: {
     created: number
     updated: number
@@ -3930,6 +3944,15 @@ export type SessionV2Info = {
   location: LocationRef
   subpath?: string
   revert?: RevertState
+}
+
+export type SessionRollup = {
+  cost: number
+  tokens: SessionTokens
+  subagents: {
+    cost: number
+    tokens: SessionTokens
+  }
 }
 
 export type PromptInputFileAttachment = {
@@ -6152,6 +6175,26 @@ export type ReferenceInfo = {
 
 export type ProjectCopyCopy = {
   directory: string
+}
+
+export type WorkflowInfo = {
+  id: string
+  name: string
+  description: string
+  path: string
+}
+
+export type WorkflowLintError = {
+  path: string
+  message: string
+}
+
+export type WorkflowRun = {
+  id: string
+  status: "running" | "completed" | "failed" | "cancelled"
+  result?: unknown
+  error?: string
+  resumeOf?: string
 }
 
 export type EventModelsDevRefreshed = {
@@ -11479,6 +11522,43 @@ export type V2SessionGetResponses = {
 
 export type V2SessionGetResponse = V2SessionGetResponses[keyof V2SessionGetResponses]
 
+export type V2SessionCostData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/cost"
+}
+
+export type V2SessionCostErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+}
+
+export type V2SessionCostError = V2SessionCostErrors[keyof V2SessionCostErrors]
+
+export type V2SessionCostResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: SessionRollup
+  }
+}
+
+export type V2SessionCostResponse = V2SessionCostResponses[keyof V2SessionCostResponses]
+
 export type V2SessionSwitchAgentData = {
   body: {
     agent: string
@@ -13587,6 +13667,136 @@ export type V2ProjectCopyRefreshResponses = {
 }
 
 export type V2ProjectCopyRefreshResponse = V2ProjectCopyRefreshResponses[keyof V2ProjectCopyRefreshResponses]
+
+export type V2WorkflowListData = {
+  body?: never
+  path?: never
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/workflow"
+}
+
+export type V2WorkflowListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2WorkflowListError = V2WorkflowListErrors[keyof V2WorkflowListErrors]
+
+export type V2WorkflowListResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: {
+      workflows: Array<WorkflowInfo>
+      errors: Array<WorkflowLintError>
+    }
+  }
+}
+
+export type V2WorkflowListResponse = V2WorkflowListResponses[keyof V2WorkflowListResponses]
+
+export type V2WorkflowRunData = {
+  body: {
+    args?: unknown
+    budgetUsd?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    resumeFromRunId?: string
+  }
+  path: {
+    id: string
+  }
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/workflow/{id}/run"
+}
+
+export type V2WorkflowRunErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowNotFoundError
+   */
+  404: WorkflowNotFoundError
+}
+
+export type V2WorkflowRunError = V2WorkflowRunErrors[keyof V2WorkflowRunErrors]
+
+export type V2WorkflowRunResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: WorkflowRun
+  }
+}
+
+export type V2WorkflowRunResponse = V2WorkflowRunResponses[keyof V2WorkflowRunResponses]
+
+export type V2WorkflowRunGetData = {
+  body?: never
+  path: {
+    runID: string
+  }
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/workflow/run/{runID}"
+}
+
+export type V2WorkflowRunGetErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowRunNotFoundError
+   */
+  404: WorkflowRunNotFoundError
+}
+
+export type V2WorkflowRunGetError = V2WorkflowRunGetErrors[keyof V2WorkflowRunGetErrors]
+
+export type V2WorkflowRunGetResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: WorkflowRun
+  }
+}
+
+export type V2WorkflowRunGetResponse = V2WorkflowRunGetResponses[keyof V2WorkflowRunGetResponses]
 
 export type PtyConnectData = {
   body?: never

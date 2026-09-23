@@ -101,6 +101,22 @@ export type ProjectCopyError = {
 export const isProjectCopyError = (value: unknown): value is ProjectCopyError =>
   typeof value === "object" && value !== null && "name" in value && value["name"] === "ProjectCopyError"
 
+export type WorkflowNotFoundError = {
+  readonly _tag: "WorkflowNotFoundError"
+  readonly workflowID: string
+  readonly message: string
+}
+export const isWorkflowNotFoundError = (value: unknown): value is WorkflowNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "WorkflowNotFoundError"
+
+export type WorkflowRunNotFoundError = {
+  readonly _tag: "WorkflowRunNotFoundError"
+  readonly runID: string
+  readonly message: string
+}
+export const isWorkflowRunNotFoundError = (value: unknown): value is WorkflowRunNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "WorkflowRunNotFoundError"
+
 export type HealthGetOutput = { readonly healthy: true }
 
 export type LocationGetInput = {
@@ -2828,3 +2844,85 @@ export type ProjectCopiesRefreshInput = {
 }
 
 export type ProjectCopiesRefreshOutput = void
+
+export type WorkflowsListInput = {
+  readonly location?: {
+    readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined
+  }["location"]
+}
+
+export type WorkflowsListOutput = {
+  readonly location: {
+    readonly directory: string
+    readonly workspaceID?: string
+    readonly project: { readonly id: string; readonly directory: string }
+  }
+  readonly data: {
+    readonly workflows: ReadonlyArray<{
+      readonly id: string
+      readonly name: string
+      readonly description: string
+      readonly path: string
+    }>
+    readonly errors: ReadonlyArray<{ readonly path: string; readonly message: string }>
+  }
+}
+
+export type WorkflowsRunInput = {
+  readonly id: { readonly id: string }["id"]
+  readonly location?: {
+    readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined
+  }["location"]
+  readonly args?: {
+    readonly args?: unknown | undefined
+    readonly budgetUsd?: number | undefined
+    readonly resumeFromRunId?: string | undefined
+  }["args"]
+  readonly budgetUsd?: {
+    readonly args?: unknown | undefined
+    readonly budgetUsd?: number | undefined
+    readonly resumeFromRunId?: string | undefined
+  }["budgetUsd"]
+  readonly resumeFromRunId?: {
+    readonly args?: unknown | undefined
+    readonly budgetUsd?: number | undefined
+    readonly resumeFromRunId?: string | undefined
+  }["resumeFromRunId"]
+}
+
+export type WorkflowsRunOutput = {
+  readonly location: {
+    readonly directory: string
+    readonly workspaceID?: string
+    readonly project: { readonly id: string; readonly directory: string }
+  }
+  readonly data: {
+    readonly id: string
+    readonly status: "running" | "completed" | "failed" | "cancelled"
+    readonly result?: JsonValue
+    readonly error?: string
+    readonly resumeOf?: string
+  }
+}
+
+export type WorkflowsGetInput = {
+  readonly runID: { readonly runID: string }["runID"]
+  readonly location?: {
+    readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined
+  }["location"]
+}
+
+export type WorkflowsGetOutput = {
+  readonly location: {
+    readonly directory: string
+    readonly workspaceID?: string
+    readonly project: { readonly id: string; readonly directory: string }
+  }
+  readonly data: {
+    readonly id: string
+    readonly status: "running" | "completed" | "failed" | "cancelled"
+    readonly result?: JsonValue
+    readonly error?: string
+    readonly resumeOf?: string
+  }
+}

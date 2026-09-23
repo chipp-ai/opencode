@@ -123,8 +123,9 @@ Commands:
   opencode debug startup          print startup timing
   opencode debug agent <name>     show agent configuration details
   opencode debug v2               debug v2 catalog and built-in plugins
-  opencode debug workflow <file>  [provisional] run a workflow script's default-exported run(ctx)
-                                  function
+  opencode debug workflow <file>  [provisional] run a workflow script (bare
+                                  agent/parallel/pipeline/phase/log/budget/args globals) in a
+                                  sandbox
   opencode debug info             show debug information
   opencode debug paths            show global paths (data, config, cache, state)
   opencode debug wait             wait indefinitely (for debugging)

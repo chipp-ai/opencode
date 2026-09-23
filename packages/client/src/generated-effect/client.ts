@@ -690,6 +690,42 @@ const adaptGroup17 = (raw: RawClient["server.projectCopy"]) => ({
   refresh: Endpoint17_2(raw),
 })
 
+type Endpoint18_0Request = Parameters<RawClient["server.workflow"]["workflow.list"]>[0]
+type Endpoint18_0Input = { readonly location?: Endpoint18_0Request["query"]["location"] }
+const Endpoint18_0 = (raw: RawClient["server.workflow"]) => (input?: Endpoint18_0Input) =>
+  raw["workflow.list"]({ query: { location: input?.["location"] } }).pipe(Effect.mapError(mapClientError))
+
+type Endpoint18_1Request = Parameters<RawClient["server.workflow"]["workflow.run"]>[0]
+type Endpoint18_1Input = {
+  readonly id: Endpoint18_1Request["params"]["id"]
+  readonly location?: Endpoint18_1Request["query"]["location"]
+  readonly args?: Endpoint18_1Request["payload"]["args"]
+  readonly budgetUsd?: Endpoint18_1Request["payload"]["budgetUsd"]
+  readonly resumeFromRunId?: Endpoint18_1Request["payload"]["resumeFromRunId"]
+}
+const Endpoint18_1 = (raw: RawClient["server.workflow"]) => (input: Endpoint18_1Input) =>
+  raw["workflow.run"]({
+    params: { id: input["id"] },
+    query: { location: input["location"] },
+    payload: { args: input["args"], budgetUsd: input["budgetUsd"], resumeFromRunId: input["resumeFromRunId"] },
+  }).pipe(Effect.mapError(mapClientError))
+
+type Endpoint18_2Request = Parameters<RawClient["server.workflow"]["workflow.run.get"]>[0]
+type Endpoint18_2Input = {
+  readonly runID: Endpoint18_2Request["params"]["runID"]
+  readonly location?: Endpoint18_2Request["query"]["location"]
+}
+const Endpoint18_2 = (raw: RawClient["server.workflow"]) => (input: Endpoint18_2Input) =>
+  raw["workflow.run.get"]({ params: { runID: input["runID"] }, query: { location: input["location"] } }).pipe(
+    Effect.mapError(mapClientError),
+  )
+
+const adaptGroup18 = (raw: RawClient["server.workflow"]) => ({
+  list: Endpoint18_0(raw),
+  run: Endpoint18_1(raw),
+  get: Endpoint18_2(raw),
+})
+
 const adaptClient = (raw: RawClient) => ({
   health: adaptGroup0(raw["server.health"]),
   location: adaptGroup1(raw["server.location"]),
@@ -709,6 +745,7 @@ const adaptClient = (raw: RawClient) => ({
   questions: adaptGroup15(raw["server.question"]),
   references: adaptGroup16(raw["server.reference"]),
   projectCopies: adaptGroup17(raw["server.projectCopy"]),
+  workflows: adaptGroup18(raw["server.workflow"]),
 })
 
 export const make = (options?: { readonly baseUrl?: URL | string }) =>

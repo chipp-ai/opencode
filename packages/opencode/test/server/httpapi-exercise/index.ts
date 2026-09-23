@@ -729,6 +729,22 @@ const scenarios: Scenario[] = [
     .status(204, undefined, "status"),
   http.protected.get("/api/command", "v2.command.list").json(200, locationData(array)),
   http.protected.get("/api/skill", "v2.skill.list").json(200, locationData(array)),
+  http.protected.get("/api/workflow", "v2.workflow.list").json(200, locationData(object)),
+  http.protected
+    .post("/api/workflow/{id}/run", "v2.workflow.run")
+    .at((ctx) => ({
+      path: route("/api/workflow/{id}/run", { id: "wf_missing" }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: {},
+    }))
+    .status(404, undefined, "status"),
+  http.protected
+    .get("/api/workflow/run/{runID}", "v2.workflow.run.get")
+    .at((ctx) => ({
+      path: route("/api/workflow/run/{runID}", { runID: "run_missing" }),
+      headers: ctx.headers(),
+    }))
+    .status(500, undefined, "status"),
   http.protected
     .get("/api/event", "v2.event.subscribe")
     .stream()

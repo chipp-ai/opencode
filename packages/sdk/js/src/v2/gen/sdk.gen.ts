@@ -339,6 +339,8 @@ import type {
   V2SessionCompactResponses,
   V2SessionContextErrors,
   V2SessionContextResponses,
+  V2SessionCostErrors,
+  V2SessionCostResponses,
   V2SessionCreateErrors,
   V2SessionCreateResponses,
   V2SessionEventsErrors,
@@ -385,6 +387,12 @@ import type {
   V2SessionWaitResponses,
   V2SkillListErrors,
   V2SkillListResponses,
+  V2WorkflowListErrors,
+  V2WorkflowListResponses,
+  V2WorkflowRunErrors,
+  V2WorkflowRunGetErrors,
+  V2WorkflowRunGetResponses,
+  V2WorkflowRunResponses,
   VcsApplyErrors,
   VcsApplyResponses,
   VcsDiffErrors,
@@ -5537,6 +5545,25 @@ export class Session3 extends HeyApiClient {
   }
 
   /**
+   * Get session cost
+   *
+   * Retrieve the session's own cost/tokens plus the subagent rollup across all descendant sessions.
+   */
+  public cost<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
+    return (options?.client ?? this.client).get<V2SessionCostResponses, V2SessionCostErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/cost",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Switch session agent
    *
    * Switch the agent used by subsequent provider turns.
@@ -6987,6 +7014,114 @@ export class ProjectCopy2 extends HeyApiClient {
   }
 }
 
+export class Run extends HeyApiClient {
+  /**
+   * Get a workflow run
+   *
+   * Fetch a previously started run's status and result -- use its id as `resumeFromRunId` to replay it.
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      runID: string
+      location?: {
+        directory?: string
+        workspace?: string
+      }
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "runID" },
+            { in: "query", key: "location" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<V2WorkflowRunGetResponses, V2WorkflowRunGetErrors, ThrowOnError>({
+      url: "/api/workflow/run/{runID}",
+      ...options,
+      ...params,
+    })
+  }
+}
+
+export class Workflow extends HeyApiClient {
+  /**
+   * List workflows
+   *
+   * Discover .opencode/workflows*.js scripts for a location.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      location?: {
+        directory?: string
+        workspace?: string
+      }
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "location" }] }])
+    return (options?.client ?? this.client).get<V2WorkflowListResponses, V2WorkflowListErrors, ThrowOnError>({
+      url: "/api/workflow",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Run a workflow
+   *
+   * Runs a discovered workflow script to completion in a sandboxed vm context and returns its final result. Blocks for the run's full duration -- there is no streaming progress yet.
+   */
+  public run<ThrowOnError extends boolean = false>(
+    parameters: {
+      id: string
+      location?: {
+        directory?: string
+        workspace?: string
+      }
+      args?: unknown
+      budgetUsd?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      resumeFromRunId?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "id" },
+            { in: "query", key: "location" },
+            { in: "body", key: "args" },
+            { in: "body", key: "budgetUsd" },
+            { in: "body", key: "resumeFromRunId" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<V2WorkflowRunResponses, V2WorkflowRunErrors, ThrowOnError>({
+      url: "/api/workflow/{id}/run",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  private _run?: Run
+  get run2(): Run {
+    return (this._run ??= new Run({ client: this.client }))
+  }
+}
+
 export class V2 extends HeyApiClient {
   private _health?: Health
   get health(): Health {
@@ -7071,6 +7206,11 @@ export class V2 extends HeyApiClient {
   private _projectCopy?: ProjectCopy2
   get projectCopy(): ProjectCopy2 {
     return (this._projectCopy ??= new ProjectCopy2({ client: this.client }))
+  }
+
+  private _workflow?: Workflow
+  get workflow(): Workflow {
+    return (this._workflow ??= new Workflow({ client: this.client }))
   }
 }
 
