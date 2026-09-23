@@ -244,6 +244,27 @@ describe("applyDirectoryEvent", () => {
     expect(store.session_status.ses_1).toBeUndefined()
   })
 
+  test("restores an unarchived session and increments sessionTotal once", () => {
+    const [store, setStore] = createStore(baseState({ session: [rootSession({ id: "ses_2" })], sessionTotal: 1 }))
+    const unarchive = () =>
+      applyDirectoryEvent({
+        event: { type: "session.updated", properties: { info: rootSession({ id: "ses_1" }) } },
+        store,
+        setStore,
+        push() {},
+        directory: "/tmp",
+        loadLsp() {},
+      })
+
+    unarchive()
+    expect(store.session.map((x) => x.id)).toEqual(["ses_1", "ses_2"])
+    expect(store.sessionTotal).toBe(2)
+
+    // A follow-up update to an already-listed session must not inflate the total.
+    unarchive()
+    expect(store.sessionTotal).toBe(2)
+  })
+
   test("ignores an archived session absent from a passive directory store", () => {
     const [store, setStore] = createStore(baseState({ session: [], sessionTotal: 0 }))
 

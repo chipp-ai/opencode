@@ -853,6 +853,102 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
+    "clears the archived timestamp when time is sent without it",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({ title: "unarchive" })
+        const path = pathFor(SessionPaths.update, { sessionID: session.id })
+
+        const archived = yield* requestJson<Session.Info>(path, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ time: { archived: 1 } }),
+        })
+        expect(archived.time.archived).toBe(1)
+
+        // Clients clear the field by omitting it; JSON.stringify drops
+        // undefined-valued properties, so the body arrives as {"time":{}}.
+        const cleared = yield* requestJson<Session.Info>(path, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ time: {} }),
+        })
+        expect(cleared.time.archived).toBeUndefined()
+
+        // Re-read so a stale value written to the row would surface here.
+        const reread = yield* requestJson<Session.Info>(pathFor(SessionPaths.get, { sessionID: session.id }), {
+          headers,
+        })
+        expect(reread.time.archived).toBeUndefined()
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "restores an unarchived session to default listings",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({ title: "findable" })
+        const path = pathFor(SessionPaths.update, { sessionID: session.id })
+        // The directory list returns archived rows too (clients filter them), so
+        // assert on the listed entry's archive state rather than its presence.
+        const listed = () =>
+          requestJson<Session.Info[]>(`${SessionPaths.list}?roots=true`, { headers }).pipe(
+            Effect.map((items) => items.find((item) => item.id === session.id)),
+          )
+        const searched = (archived: boolean) =>
+          requestJson<Session.Info[]>(
+            `${ExperimentalPaths.session}?${new URLSearchParams({ search: "findable", ...(archived ? { archived: "true" } : {}) })}`,
+            { headers },
+          ).pipe(Effect.map((items) => items.map((item) => item.id)))
+
+        yield* requestJson<Session.Info>(path, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ time: { archived: Date.now() } }),
+        })
+        expect((yield* listed())?.time.archived).toBeNumber()
+        expect(yield* searched(false)).not.toContain(session.id)
+        expect(yield* searched(true)).toContain(session.id)
+
+        yield* requestJson<Session.Info>(path, { method: "PATCH", headers, body: JSON.stringify({ time: {} }) })
+        expect((yield* listed())?.time.archived).toBeUndefined()
+        expect(yield* searched(false)).toContain(session.id)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "leaves the archived timestamp untouched when time is absent",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({ title: "archived" })
+        const path = pathFor(SessionPaths.update, { sessionID: session.id })
+
+        yield* requestJson<Session.Info>(path, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ time: { archived: 1 } }),
+        })
+
+        const renamed = yield* requestJson<Session.Info>(path, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ title: "renamed" }),
+        })
+        expect(renamed.title).toBe("renamed")
+        expect(renamed.time.archived).toBe(1)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
     "uses project-scoped path and directory precedence",
     () =>
       Effect.gen(function* () {
