@@ -6,6 +6,16 @@ Each entry names the upstream gap it addresses, whether it originated as our own
 
 ## Implemented
 
+### Live tokens/sec display
+
+The TUI now shows generation speed while an assistant response streams (`▣ Build · <model> · ~NN tok/s`, refreshing every 500ms) and a final rate once the turn completes.
+
+- **Upstream gap:** [anomalyco/opencode#5374](https://github.com/anomalyco/opencode/issues/5374) — 111 reactions. Two small PRs existed, both closed by automated bots and never reviewed: [#46882](https://github.com/anomalyco/opencode/pull/46882) (closed by the 2-hour PR-template-compliance bot, same day) and [#42372](https://github.com/anomalyco/opencode/pull/42372) (closed by the 1-month/low-reaction bot; targets the web app, only computes a rate after the turn ends).
+- **Origin:** implemented by an Opus 5 agent. The footer placement and refresh approach come from #46882, which already targeted `packages/tui`. The ~4-characters-per-token live estimate and the "only count text/reasoning parts" rule are also from #46882. The "show a rate after completion too" idea is from [#37052](https://github.com/anomalyco/opencode/pull/37052) (a bundled PR also containing an unrelated paste-expand feature — only the tokens/sec piece was used) — but #37052's own final-rate formula was rewritten because it counted input and cache tokens, badly inflating the number; this fork's version counts only output and reasoning tokens. New: the measurement window starts at the first streamed token rather than message creation (so waiting for the first token doesn't deflate the rate) and stops at the last finished text/reasoning part (so time spent running tools doesn't either).
+- **Where:** new `packages/tui/src/util/throughput.ts` (~40 lines: `tokensPerSecond`, `liveTokensPerSecond`, `finalTokensPerSecond`), wired into the assistant-message footer in `packages/tui/src/routes/session/index.tsx`.
+- **Known gaps:** the live number is a character-count estimate (`~4 chars/token`), not exact — providers only report real output-token counts at step-finish, and getting an exact live rate would require Core to send usage mid-stream, which wasn't touched here. Each tool step gets its own assistant message with its own footer, so the shown rate is for the final step of a turn, not averaged across the whole turn. An interrupted response shows no rate (it never gets a completed timestamp). Not yet watched running live in the actual TUI, only unit-tested.
+- **Verified:** `bun typecheck` clean in `packages/tui`. New `packages/tui/test/util/throughput.test.ts` (9 tests) covers the rate math, the under-1-second cutoff, a growing stream sampled over time, text+reasoning summed together, tool time excluded, missing-timestamp fallback, and the final-rate formula ignoring input/cache tokens. Full `packages/tui` suite: 208 pass (re-verified against this fork's current `dev`, not just the agent's own stale worktree base).
+
 ### Model fallback on exhausted retries
 
 When a provider/model keeps failing after `RequestExecutor`'s transport retry budget is spent (429/5xx/529), the V2 session runner now fails over to the next model in the agent's configured `fallback` chain instead of erroring the turn out to the user.
