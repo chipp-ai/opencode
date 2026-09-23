@@ -21,6 +21,10 @@ export const Info = Schema.Struct({
   id: ID,
   model: Model.Ref.pipe(optional),
   fallback: Schema.Array(Model.Ref).pipe(optional),
+  fallbackCircular: Schema.Boolean.pipe(optional).annotate({
+    description:
+      "Once every model in `fallback` has failed, try the model that started the chain again before giving up",
+  }),
   request: Provider.Request,
   system: Schema.String.pipe(optional),
   description: Schema.String.pipe(optional),

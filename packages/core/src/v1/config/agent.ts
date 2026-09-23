@@ -15,6 +15,10 @@ const AgentSchema = Schema.StructWithRest(
     fallback: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
       description: "Ordered provider/model fallbacks tried when the selected model fails with a transient error",
     }),
+    fallbackCircular: Schema.optional(Schema.Boolean).annotate({
+      description:
+        "Once every model in `fallback` has failed, try the model that started the chain again before giving up",
+    }),
     variant: Schema.optional(Schema.String).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",
     }),
@@ -47,6 +51,7 @@ const KNOWN_KEYS = new Set([
   "name",
   "model",
   "fallback",
+  "fallbackCircular",
   "variant",
   "prompt",
   "description",

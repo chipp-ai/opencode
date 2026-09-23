@@ -147,6 +147,7 @@ export type AgentsListOutput = {
     readonly id: string
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     readonly fallback?: ReadonlyArray<{ readonly id: string; readonly providerID: string; readonly variant?: string }>
+    readonly fallbackCircular?: boolean
     readonly request: {
       readonly headers: { readonly [x: string]: string }
       readonly body: { readonly [x: string]: JsonValue }

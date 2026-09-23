@@ -255,6 +255,7 @@ const layer = Layer.effect(
       let overflowFailure: ProviderErrorEvent | undefined
       let fallbackFailure: ProviderErrorEvent | undefined
       const fallback = agent.info?.fallback ?? []
+      const fallbackCircular = agent.info?.fallbackCircular ?? false
       const providerStream = llm.stream(request).pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
@@ -329,11 +330,13 @@ const layer = Layer.effect(
             SessionRunnerFallback.shouldFallback(fallbackFailure ?? failure)
           ) {
             const current = { id: info.id, providerID: info.providerID }
-            const next = yield* Effect.findFirst(SessionRunnerFallback.candidates(current, fallback, tried), (ref) =>
-              restore(models.resolve({ ...session, model: ref })).pipe(
-                Effect.as(true),
-                Effect.orElseSucceed(() => false),
-              ),
+            const next = yield* Effect.findFirst(
+              SessionRunnerFallback.candidates(current, fallback, tried, fallbackCircular),
+              (ref) =>
+                restore(models.resolve({ ...session, model: ref })).pipe(
+                  Effect.as(true),
+                  Effect.orElseSucceed(() => false),
+                ),
             )
             if (Option.isSome(next)) {
               yield* Effect.logInfo("model fallback", {

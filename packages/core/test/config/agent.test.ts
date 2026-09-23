@@ -209,13 +209,21 @@ describe("ConfigAgentPlugin.Plugin", () => {
               type: "document",
               info: decode({
                 agents: {
-                  build: { model: "anthropic/claude-sonnet", fallback: ["openai/gpt-5", "openrouter/openai/gpt-5"] },
+                  build: {
+                    model: "anthropic/claude-sonnet",
+                    fallback: ["openai/gpt-5", "openrouter/openai/gpt-5"],
+                    fallbackCircular: true,
+                  },
                 },
               }),
             }),
             new Config.Document({
               type: "document",
-              info: decode(ConfigMigrateV1.migrate({ agent: { plan: { fallback: ["openai/gpt-5-mini"] } } })),
+              info: decode(
+                ConfigMigrateV1.migrate({
+                  agent: { plan: { fallback: ["openai/gpt-5-mini"], fallbackCircular: true } },
+                }),
+              ),
             }),
           ]),
       })
@@ -228,9 +236,32 @@ describe("ConfigAgentPlugin.Plugin", () => {
         { providerID: "openai", id: "gpt-5" },
         { providerID: "openrouter", id: "openai/gpt-5" },
       ])
+      expect((yield* agents.get(AgentV2.ID.make("build")))?.fallbackCircular).toBe(true)
       expect((yield* agents.get(AgentV2.ID.make("plan")))?.fallback).toMatchObject([
         { providerID: "openai", id: "gpt-5-mini" },
       ])
+      expect((yield* agents.get(AgentV2.ID.make("plan")))?.fallbackCircular).toBe(true)
+    }),
+  )
+
+  it.effect("defaults fallbackCircular to unset when not configured", () =>
+    Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+      const config = Config.Service.of({
+        entries: () =>
+          Effect.succeed([
+            new Config.Document({
+              type: "document",
+              info: decode({ agents: { build: { model: "anthropic/claude-sonnet", fallback: ["openai/gpt-5"] } } }),
+            }),
+          ]),
+      })
+
+      yield* ConfigAgentPlugin.Plugin.effect(host({ agent: agentHost(agents) })).pipe(
+        Effect.provideService(Config.Service, config),
+      )
+
+      expect((yield* agents.get(AgentV2.ID.make("build")))?.fallbackCircular).toBeUndefined()
     }),
   )
 

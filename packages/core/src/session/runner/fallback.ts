@@ -26,13 +26,25 @@ export function shouldFallback(failure: unknown) {
   return failure.retryable === true && failure.classification !== "context-overflow"
 }
 
-/** Returns untried fallback refs in configured order, excluding the model that just failed. */
+/**
+ * Returns untried fallback refs in configured order, excluding the model that just failed.
+ *
+ * With `circular`, once every configured fallback has been tried and failed, the model that started the
+ * chain (`tried[0]`) gets one more attempt before the chain is treated as exhausted — but only once, so a
+ * model that is genuinely down does not loop forever. `current === tried[0]` marks that the circular retry
+ * itself just failed, which is the signal to stop rather than loop back again.
+ */
 export function candidates(
   current: ModelV2.Ref,
   fallback: ReadonlyArray<ModelV2.Ref>,
   tried: ReadonlyArray<ModelV2.Ref>,
+  circular = false,
 ) {
-  return fallback.filter((ref) => !same(ref, current) && !tried.some((item) => same(item, ref)))
+  const untried = fallback.filter((ref) => !same(ref, current) && !tried.some((item) => same(item, ref)))
+  if (untried.length > 0) return untried
+  const original = tried[0]
+  if (!circular || !original || same(original, current)) return []
+  return [original]
 }
 
 export function same(left: ModelV2.Ref, right: ModelV2.Ref) {

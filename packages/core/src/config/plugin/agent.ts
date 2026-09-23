@@ -32,6 +32,7 @@ const pathActions = ["external_directory", "read", "edit"] as const satisfies re
 const agentKeys = new Set([
   "model",
   "fallback",
+  "fallbackCircular",
   "variant",
   "request",
   "system",
@@ -99,6 +100,7 @@ export const Plugin = define({
                   return { id: model.modelID, providerID: model.providerID }
                 })
               }
+              if (item.fallbackCircular !== undefined) agent.fallbackCircular = item.fallbackCircular
               if (item.variant !== undefined && agent.model !== undefined) {
                 agent.model.variant = ModelV2.VariantID.make(item.variant)
               }

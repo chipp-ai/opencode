@@ -54,7 +54,9 @@ type Reply = { readonly status: number; readonly body?: string; readonly headers
 
 // Per-model scripted HTTP replies. The real RequestExecutor classifies statuses and spends its retry budget,
 // so the runner only sees what survives transport retries — the exact boundary fallback is meant to cover.
-const replies = new Map<string, Reply>()
+// A function reply is resolved fresh on every call, so a test can flip a model's outcome mid-run — e.g. to
+// prove a circular fallback chain genuinely walks back to a model that was failing and retries it for real.
+const replies = new Map<string, Reply | (() => Reply)>()
 const calls: string[] = []
 const decodeBody = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({ model: Schema.String })))
 const success = (text: string): Reply => ({
@@ -78,7 +80,8 @@ const http = Layer.succeed(
       const web = yield* HttpClientRequest.toWeb(request).pipe(Effect.orDie)
       const model = decodeBody(yield* Effect.promise(() => web.text())).model
       calls.push(model)
-      const reply = replies.get(model) ?? failure(500, `No scripted reply for ${model}`)
+      const scripted = replies.get(model) ?? failure(500, `No scripted reply for ${model}`)
+      const reply = typeof scripted === "function" ? scripted() : scripted
       return HttpClientResponse.fromWeb(
         request,
         new Response(reply.body, { status: reply.status, headers: reply.headers }),
@@ -187,7 +190,7 @@ const it = testEffect(
 
 const sessionID = SessionV2.ID.make("ses_runner_fallback")
 
-const setup = (fallback: ReadonlyArray<ModelV2.Ref>) =>
+const setup = (fallback: ReadonlyArray<ModelV2.Ref>, fallbackCircular = false) =>
   Effect.gen(function* () {
     replies.clear()
     calls.length = 0
@@ -196,6 +199,7 @@ const setup = (fallback: ReadonlyArray<ModelV2.Ref>) =>
       editor.update(AgentV2.ID.make("build"), (agent) => {
         agent.mode = "primary"
         agent.fallback = fallback.map((item) => ({ ...item }))
+        agent.fallbackCircular = fallbackCircular
       }),
     )
     const { db } = yield* Database.Service
@@ -339,6 +343,74 @@ describe("SessionRunner fallback", () => {
       expect(yield* sessionModel).toBeNull()
     }),
   )
+
+  it.live("circular: retries the original model once the whole fallback chain fails, and succeeds there", () =>
+    Effect.gen(function* () {
+      const session = yield* setup([backup], true)
+      // Fails for its first attempt-set (the initial 1 + 2 retries), then succeeds — proving the
+      // circular retry is a real second attempt against `primary`, not a no-op or a stale success.
+      let primaryCalls = 0
+      replies.set(primary.id, () => {
+        primaryCalls++
+        return primaryCalls <= 3 ? failure(503) : success("Served by primary the second time around")
+      })
+      replies.set(backup.id, failure(503, "backup down"))
+
+      yield* session.resume(sessionID)
+
+      expect(calls).toEqual(["primary", "primary", "primary", "backup", "backup", "backup", "primary"])
+      const context = yield* session.context(sessionID)
+      expect(context.filter((message) => message.type === "model-switched")).toMatchObject([
+        { model: { id: "backup" } },
+        { model: { id: "primary" } },
+      ])
+      expect(context.filter((message) => message.type === "assistant")).toMatchObject([
+        { model: { id: "primary" }, content: [{ type: "text", text: "Served by primary the second time around" }] },
+      ])
+      expect(yield* sessionModel).toMatchObject({ id: "primary" })
+    }),
+  )
+
+  it.live("circular: still surfaces the terminal failure after one full circuit back to the original model", () =>
+    Effect.gen(function* () {
+      const session = yield* setup([backup], true)
+      replies.set(primary.id, failure(503))
+      replies.set(backup.id, failure(503, "backup down"))
+
+      const error = yield* session.resume(sessionID).pipe(Effect.flip)
+
+      expect(error).toBeInstanceOf(LLMError)
+      // primary x3, backup x3, then the circular retry of primary x3 — then truly exhausted.
+      expect(calls).toEqual([
+        "primary",
+        "primary",
+        "primary",
+        "backup",
+        "backup",
+        "backup",
+        "primary",
+        "primary",
+        "primary",
+      ])
+      const context = yield* session.context(sessionID)
+      expect(context.filter((message) => message.type === "assistant")).toMatchObject([
+        { model: { id: "primary" }, finish: "error" },
+      ])
+    }),
+  )
+
+  it.live("does not circle back when fallbackCircular is not set", () =>
+    Effect.gen(function* () {
+      const session = yield* setup([backup], false)
+      replies.set(primary.id, failure(503))
+      replies.set(backup.id, failure(503, "backup down"))
+
+      const error = yield* session.resume(sessionID).pipe(Effect.flip)
+
+      expect(error).toBeInstanceOf(LLMError)
+      expect(calls).toEqual(["primary", "primary", "primary", "backup", "backup", "backup"])
+    }),
+  )
 })
 
 const http404 = new HttpContext({
@@ -381,5 +453,23 @@ describe("SessionRunnerFallback", () => {
     expect(SessionRunnerFallback.candidates(primary, [backup, primary, spare], [])).toEqual([backup, spare])
     expect(SessionRunnerFallback.candidates(backup, [backup, spare], [primary])).toEqual([spare])
     expect(SessionRunnerFallback.candidates(spare, [backup, spare], [primary, backup])).toEqual([])
+  })
+
+  test("circular: offers the original model once every fallback is exhausted", () => {
+    // Same exhausted state as the non-circular case above, but with circular=true.
+    expect(SessionRunnerFallback.candidates(spare, [backup, spare], [primary, backup], true)).toEqual([primary])
+  })
+
+  test("circular: stops after the original model's own circular retry fails, rather than looping forever", () => {
+    // `current === tried[0]` marks that the circular retry of `primary` itself just failed.
+    expect(SessionRunnerFallback.candidates(primary, [backup, spare], [primary, backup, spare], true)).toEqual([])
+  })
+
+  test("circular has no effect while untried fallbacks remain", () => {
+    expect(SessionRunnerFallback.candidates(primary, [backup, spare], [], true)).toEqual([backup, spare])
+  })
+
+  test("circular is a no-op with no fallback history to circle back to", () => {
+    expect(SessionRunnerFallback.candidates(primary, [], [], true)).toEqual([])
   })
 })

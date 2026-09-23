@@ -1709,6 +1709,7 @@ export type PermissionConfig =
 export type AgentConfig = {
   model?: string
   fallback?: Array<string>
+  fallbackCircular?: boolean
   variant?: string
   temperature?: number
   top_p?: number
@@ -1734,11 +1735,11 @@ export type AgentConfig = {
     | unknown
     | string
     | Array<string>
+    | boolean
     | number
     | {
         [key: string]: boolean
       }
-    | boolean
     | "subagent"
     | "primary"
     | "all"
@@ -3971,6 +3972,7 @@ export type AgentV2Info = {
   id: string
   model?: ModelRef
   fallback?: Array<ModelRef>
+  fallbackCircular?: boolean
   request: ProviderRequest
   system?: string
   description?: string

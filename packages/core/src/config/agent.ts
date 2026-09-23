@@ -16,6 +16,10 @@ export class Info extends Schema.Class<Info>("ConfigV2.Agent")({
     description:
       "Ordered provider/model fallbacks tried when the selected model fails with a retryable, quota, or transport error",
   }),
+  fallbackCircular: Schema.Boolean.pipe(Schema.optional).annotate({
+    description:
+      "Once every model in `fallback` has failed, try the model that started the chain again before giving up",
+  }),
   variant: Schema.String.pipe(Schema.optional),
   request: ConfigProvider.Request.pipe(Schema.optional),
   system: Schema.String.pipe(Schema.optional),
