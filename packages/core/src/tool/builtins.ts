@@ -10,6 +10,7 @@ import { GrepTool } from "./grep"
 import { QuestionTool } from "./question"
 import { ReadTool } from "./read"
 import { SkillTool } from "./skill"
+import { TaskTool } from "./task"
 import { TodoWriteTool } from "./todowrite"
 import { WebFetchTool } from "./webfetch"
 import { WebSearchTool } from "./websearch"
@@ -27,11 +28,12 @@ import { WriteTool } from "./write"
  * parity, LSP, repo_clone, repo_overview, plan_exit, and Rune/code mode. Keep
  * MCP and plugin transforms separate from this static built-in list.
  *
- * `task` is deliberately NOT here despite being ported (see `./task.ts`'s own module comment):
- * it needs `SessionV2.Service`, which itself depends (through `location-service-map.ts`) on the
- * same location bootstrap this file composes into -- including it here would close a real
- * dependency cycle. It's composed as a separate node alongside `SessionV2.node` at the server's
- * own top-level composition instead.
+ * `task` depends on `SessionDispatchPort` (`../session/dispatch-port.ts`) rather than `SessionV2`
+ * directly -- see that module's own doc comment for why a direct dependency here would close a
+ * real cycle between session orchestration and this file's own location/tool bootstrap. The port
+ * is an unbound node; its real implementation is supplied at the server's top-level composition
+ * (`packages/opencode/src/server/routes/instance/httpapi/server.ts`), derived from the same
+ * `SessionV2.node` build already composed there.
  */
 export const node = makeLocationNode({
   name: "built-in-tools",
@@ -45,6 +47,7 @@ export const node = makeLocationNode({
     QuestionTool.node,
     ReadTool.node,
     SkillTool.node,
+    TaskTool.node,
     TodoWriteTool.node,
     WebFetchTool.node,
     WebSearchTool.node,

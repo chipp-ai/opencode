@@ -17,6 +17,7 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionDispatchPort } from "@opencode-ai/core/session/dispatch-port"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { Prompt } from "@opencode-ai/core/session/prompt"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -171,12 +172,32 @@ const buildLayers = (permission: Layer.Layer<PermissionV2.Service>) => {
       })
     }),
   ).pipe(Layer.provide(runnerLayer))
+  // Proves the real composition-root wiring `server.ts` needs (see dispatch-port.ts's own doc
+  // comment). A *raw* Layer (not a Node) as a replacement value: `LayerNode`'s own
+  // `replacementNode()` auto-wraps a raw Layer with `deps: []`, exactly like `LocationServiceMap`
+  // itself is supplied (`locationServiceMapV2` is a raw Layer too, never a Node). This matters
+  // because `location-services.ts`'s own per-location `hoist()` recursively pulls in any *declared
+  // node dependency* of a global-tagged replacement -- a `[SessionDispatchPort.node, nodeWithDeps]`
+  // replacement whose own deps include `SessionV2.node` would drag `SessionV2.node`'s *entire*
+  // graph (including its own unresolved `LocationServiceMap.node` dependency) into that same
+  // per-location compile pass, which has no replacement for it there and would throw at runtime.
+  // A raw Layer's requirement isn't a *declared graph edge* the hoist walk can see or follow at
+  // all -- it leaks upward as an ordinary Effect requirement instead, satisfied later by whatever
+  // composition provides `SessionV2.Service` as an ordinary peer (in the real server, the same
+  // `AppNodeBuilderV1.build(SessionV2.node, [...])` peer that's already provided alongside
+  // `locationServiceMapV2` today).
+  const dispatchPortLayer = Layer.effect(
+    SessionDispatchPort.Service,
+    Effect.map(SessionV2.Service, (real) => real as unknown as SessionDispatchPort.Interface),
+  )
   return AppNodeBuilder.build(
     LayerNode.group([
       Database.node,
       EventV2.node,
       SessionProjector.node,
       SessionStore.node,
+      SessionExecution.node,
+      SessionV2.node,
       AgentV2.node,
       ToolRegistry.node,
       TaskTool.node,
@@ -187,8 +208,6 @@ const buildLayers = (permission: Layer.Layer<PermissionV2.Service>) => {
       Config.node,
       Snapshot.node,
       SessionRunnerLLM.node,
-      SessionExecution.node,
-      SessionV2.node,
     ]),
     [
       [LayerNodePlatform.llmClient, client],
@@ -202,6 +221,7 @@ const buildLayers = (permission: Layer.Layer<PermissionV2.Service>) => {
       [SessionExecution.node, execution],
       [Config.node, config],
       [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+      [SessionDispatchPort.node, dispatchPortLayer],
     ],
   )
 }

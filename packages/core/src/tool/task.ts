@@ -8,23 +8,15 @@ import { makeLocationNode } from "../effect/app-node"
 import { Location } from "../location"
 import { ModelV2 } from "../model"
 import { PermissionV2 } from "../permission"
-import { SessionV2 } from "../session"
+import { SessionDispatchPort } from "../session/dispatch-port"
 import { Tool } from "./tool"
 import { ToolRegistry } from "./registry"
 import { Tools } from "./tools"
 import { WorkflowAgentDispatch } from "../workflow/agent-dispatch"
 
-// This tool is NOT part of `packages/core/src/tool/builtins.ts`/`location-services.ts`'s own
-// bundle, unlike the other built-in tools: `SessionV2.Service` (used by `WorkflowAgentDispatch`)
-// itself depends, through `location-service-map.ts`, on the same location bootstrap that
-// `location-services.ts` composes -- a tool living inside that bundle that also needs to create
-// and orchestrate sessions would close a real dependency cycle, not just a TypeScript one.
-// Instead this node is composed directly alongside `SessionV2.node` at the server's own top-level
-// composition (`packages/opencode/src/server/routes/instance/httpapi/server.ts`), the same place
-// that already builds `SessionV2.node` as a peer of `location-services.ts`'s bundle rather than a
-// dependency of it. It still registers into the same Location-scoped `Tools.Service`/
-// `ToolRegistry.Service` singleton that `location-services.ts` builds, so it appears in the tool
-// catalog exactly like any other built-in once both are composed together.
+// Depends on `SessionDispatchPort` rather than `../session`'s `SessionV2` directly: see that
+// module's own doc comment for why a direct import here would close a real dependency cycle
+// between session orchestration and the Location/tool bootstrap this tool composes into.
 export const name = "task"
 
 // Matches V1's default (`packages/opencode/src/config/config.ts`'s `subagent_depth`) so a
@@ -60,15 +52,17 @@ function parseModelOverride(input: string) {
   return Effect.succeed({ pattern, ref: { id: parsed.modelID, providerID: parsed.providerID } })
 }
 
+const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
 const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const tools = yield* Tools.Service
     const agents = yield* AgentV2.Service
     const permission = yield* PermissionV2.Service
-    const sessions = yield* SessionV2.Service
+    const sessions = yield* SessionDispatchPort.Service
     const location = yield* Location.Service
-    const database = yield* Database.Service
     const registry = yield* ToolRegistry.Service
+    const database = yield* Database.Service
 
     yield* tools
       .register({
@@ -87,7 +81,7 @@ const layer = Layer.effectDiscard(
               const source = { type: "tool" as const, messageID: context.assistantMessageID, callID: context.toolCallID }
 
               const getSession = (id: typeof context.sessionID) =>
-                sessions.get(id).pipe(Effect.mapError((error) => new ToolFailure({ message: error.message })))
+                sessions.get(id).pipe(Effect.mapError((error) => new ToolFailure({ message: errorMessage(error) })))
               let depth = 0
               let current = yield* getSession(context.sessionID)
               while (current.parentID) {
@@ -110,7 +104,7 @@ const layer = Layer.effectDiscard(
                     agent: context.agent,
                     source,
                   })
-                  .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message })))
+                  .pipe(Effect.mapError((error) => new ToolFailure({ message: errorMessage(error) })))
 
               yield* permission
                 .assert({
@@ -121,13 +115,24 @@ const layer = Layer.effectDiscard(
                   agent: context.agent,
                   source,
                 })
-                .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message })))
+                .pipe(Effect.mapError((error) => new ToolFailure({ message: errorMessage(error) })))
 
               const target = yield* agents.get(AgentV2.ID.make(input.subagent_type))
               if (!target)
                 return yield* Effect.fail(new ToolFailure({ message: `Unknown agent type: ${input.subagent_type}` }))
 
               const model = overrideModel?.ref ?? target.model
+              // Dynamic import: `WorkflowAgentDispatch.run` requires `SessionV2.Service` itself
+              // (statically imported inside `agent-dispatch.ts`, which is fine there since that
+              // file never joins the Location/tool bootstrap). Getting the *tag* here via a
+              // dynamic import -- purely to name it as the `Effect.provideService` target below --
+              // avoids reintroducing a static `../session` import into this file, which is what
+              // `SessionDispatchPort` exists to prevent. The value provided is the real port
+              // instance from this tool's own `deps` (`sessions`); the cast only widens its type
+              // back to `SessionV2.Interface`'s shape, since it already matches at runtime -- the
+              // composition root (`packages/opencode/.../server.ts`) supplies the real
+              // `SessionV2.Service` as this port's implementation in the first place.
+              const { SessionV2 } = yield* Effect.promise(() => import("../session"))
               const result = yield* WorkflowAgentDispatch.run({
                 location: { directory: location.directory, workspaceID: location.workspaceID },
                 parentSessionID: context.sessionID,
@@ -137,14 +142,11 @@ const layer = Layer.effectDiscard(
                 steps: target.steps,
                 prompt: { text: input.prompt },
               }).pipe(
-                // `WorkflowAgentDispatch.run` requires these services itself; this tool's own
-                // `deps` already guarantee they exist in the ambient Location context, so this
-                // just re-threads the already-resolved instances rather than re-yielding them.
                 Effect.provideService(AgentV2.Service, agents),
-                Effect.provideService(SessionV2.Service, sessions),
+                Effect.provideService(SessionV2.Service, sessions as unknown as InstanceType<typeof SessionV2.Service>),
                 Effect.provideService(Database.Service, database),
                 Effect.provideService(ToolRegistry.Service, registry),
-                Effect.mapError((error) => new ToolFailure({ message: error.message })),
+                Effect.mapError((error) => new ToolFailure({ message: errorMessage(error) })),
               )
 
               if (result.error)
@@ -163,5 +165,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/task",
   layer,
-  deps: [ToolRegistry.node, PermissionV2.node, AgentV2.node, Location.node, SessionV2.node, Database.node],
+  deps: [ToolRegistry.node, PermissionV2.node, AgentV2.node, Location.node, SessionDispatchPort.node, Database.node],
 })

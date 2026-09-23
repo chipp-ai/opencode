@@ -24,6 +24,7 @@ import { Pty } from "./pty"
 import { QuestionV2 } from "./question"
 import { Reference } from "./reference"
 import { ReferenceGuidance } from "./reference/guidance"
+import { SessionDispatchPort } from "./session/dispatch-port"
 import * as SessionRunnerLLM from "./session/runner/llm"
 import { SessionRunnerModel } from "./session/runner/model"
 import { SessionTodo } from "./session/todo"
@@ -81,14 +82,28 @@ export const locationServices = LayerNode.group([
 export type LocationServices = LayerNode.Output<typeof locationServices>
 export type LocationError = LayerNode.Error<typeof locationServices>
 
+// `./tool/task.ts`'s registration layer unconditionally yields `SessionDispatchPort.Service` as
+// soon as this bundle boots for a Location -- not only when the `task` tool is actually called --
+// so every caller needs *some* implementation of it. Default to one that dies if actually invoked
+// unless the caller already supplied their own (the composition root with a real `SessionV2`-backed
+// implementation, e.g. `packages/opencode/src/server/routes/instance/httpapi/server.ts`). This is
+// the single choke point every caller of this function goes through, unlike
+// `effect/app-node-builder.ts`'s own auto-detection (which only helps callers routed through
+// `AppNodeBuilder.build`, not direct callers of this function).
+function withDispatchPortDefault(replacements: LayerNode.Replacements) {
+  if (replacements.some(([source]) => source.name === SessionDispatchPort.node.name)) return replacements
+  return replacements.concat([[SessionDispatchPort.node, SessionDispatchPort.unavailableLayer]])
+}
+
 export function buildLocationServiceMap(
   replacements: LayerNode.Replacements = [],
 ): Layer.Layer<LocationServiceMap.Service> {
+  const withDefaults = withDispatchPortDefault(replacements)
   return Layer.effect(
     LocationServiceMap.Service,
     LayerMap.make(
       (ref: Location.Ref) => {
-        const allReplacements = replacements.concat([[Location.node, Location.boundNode(ref)]])
+        const allReplacements = withDefaults.concat([[Location.node, Location.boundNode(ref)]])
         // Apply replacements during hoist, not afterward: replacements can
         // introduce new tagged dependencies (Location.boundNode depends on
         // Project), and the hoist walk is the only pass that can still slice

@@ -65,6 +65,7 @@ import { WorkflowRegistry } from "@opencode-ai/core/workflow/registry"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionDispatchPort } from "@opencode-ai/core/session/dispatch-port"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
 import { lazy } from "@/util/lazy"
@@ -273,7 +274,20 @@ const app = LayerNode.group([
 export function createRoutes(
   corsOptions?: CorsOptions,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
-  const locationServiceMapV2 = buildLocationServiceMap()
+  // Real implementation of the `SessionDispatchPort` unbound node the `task` tool depends on
+  // (see `@opencode-ai/core/session/dispatch-port`'s own doc comment for why it exists). A *raw*
+  // Layer, like `locationServiceMapV2` itself just below -- never a Node with `SessionV2.node` as
+  // a declared dependency, which would make `location-services.ts`'s own per-location `hoist()`
+  // recursively pull `SessionV2.node`'s entire graph (including its own unresolved
+  // `LocationServiceMap.node` dependency) into that same per-location compile pass, where nothing
+  // replaces it. As a raw Layer, its `SessionV2.Service` requirement isn't a declared graph edge
+  // the hoist walk can see at all -- it surfaces as an ordinary Effect requirement instead,
+  // satisfied by the `AppNodeBuilderV1.build(SessionV2.node, [...])` peer already provided below.
+  const dispatchPortLayer = Layer.effect(
+    SessionDispatchPort.Service,
+    Effect.map(SessionV2.Service, (real) => real as unknown as SessionDispatchPort.Interface),
+  )
+  const locationServiceMapV2 = buildLocationServiceMap([[SessionDispatchPort.node, dispatchPortLayer]])
 
   return Layer.mergeAll(
     rootApiRoutes,
