@@ -98,6 +98,29 @@ export const PromptAdmitted = Event.define({
 })
 export type PromptAdmitted = typeof PromptAdmitted.Type
 
+/** Removes one admitted input that has not been promoted yet. Promoted inputs cannot be withdrawn. */
+export const PromptWithdrawn = Event.define({
+  type: "session.next.prompt.withdrawn",
+  ...options,
+  schema: {
+    ...Base,
+    messageID: SessionMessage.ID,
+  },
+})
+export type PromptWithdrawn = typeof PromptWithdrawn.Type
+
+/** Replaces the prompt of one admitted input that has not been promoted yet, keeping its queue position. */
+export const PromptRevised = Event.define({
+  type: "session.next.prompt.revised",
+  ...options,
+  schema: {
+    ...Base,
+    messageID: SessionMessage.ID,
+    prompt: Prompt,
+  },
+})
+export type PromptRevised = typeof PromptRevised.Type
+
 export const ContextUpdated = Event.define({
   type: "session.next.context.updated",
   ...options,
@@ -451,6 +474,8 @@ export const DurableDefinitions = Event.inventory(
   Moved,
   Prompted,
   PromptAdmitted,
+  PromptWithdrawn,
+  PromptRevised,
   ContextUpdated,
   Synthetic,
   Shell.Started,
@@ -482,6 +507,8 @@ export const Definitions = Event.inventory(
   Moved,
   Prompted,
   PromptAdmitted,
+  PromptWithdrawn,
+  PromptRevised,
   ContextUpdated,
   Synthetic,
   Shell.Started,

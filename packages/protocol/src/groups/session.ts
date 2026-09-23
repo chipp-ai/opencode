@@ -239,6 +239,54 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
         ),
     )
     .add(
+      HttpApiEndpoint.get("session.input.list", "/api/session/:sessionID/input", {
+        params: { sessionID: Session.ID },
+        success: Schema.Struct({ data: Schema.Array(SessionInput.Admitted) }),
+        error: SessionNotFoundError,
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "v2.session.input.list",
+            summary: "List pending inputs",
+            description: "List admitted inputs that have not been promoted into visible messages, in promotion order.",
+          }),
+        ),
+    )
+    .add(
+      HttpApiEndpoint.patch("session.input.revise", "/api/session/:sessionID/input/:messageID", {
+        params: { sessionID: Session.ID, messageID: SessionMessage.ID },
+        payload: Schema.Struct({ prompt: PromptInput.Prompt }),
+        success: Schema.Struct({ data: SessionInput.Admitted }),
+        error: [ConflictError, SessionNotFoundError],
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "v2.session.input.revise",
+            summary: "Edit pending input",
+            description:
+              "Replace the prompt of an admitted input before it is promoted, keeping its delivery and position. Fails with a conflict once the input was promoted or withdrawn.",
+          }),
+        ),
+    )
+    .add(
+      HttpApiEndpoint.delete("session.input.withdraw", "/api/session/:sessionID/input/:messageID", {
+        params: { sessionID: Session.ID, messageID: SessionMessage.ID },
+        success: HttpApiSchema.NoContent,
+        error: [ConflictError, SessionNotFoundError],
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "v2.session.input.withdraw",
+            summary: "Remove pending input",
+            description:
+              "Withdraw an admitted input before it is promoted so it never runs. Fails with a conflict once the input was promoted or withdrawn.",
+          }),
+        ),
+    )
+    .add(
       HttpApiEndpoint.post("session.compact", "/api/session/:sessionID/compact", {
         params: { sessionID: Session.ID },
         success: HttpApiSchema.NoContent,

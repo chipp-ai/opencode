@@ -21,6 +21,8 @@ export type Event =
   | EventSessionNextMoved
   | EventSessionNextPrompted
   | EventSessionNextPromptAdmitted
+  | EventSessionNextPromptWithdrawn
+  | EventSessionNextPromptRevised
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
   | EventSessionNextShellStarted
@@ -872,6 +874,25 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.prompt.withdrawn"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+        }
+      }
+    | {
+        id: string
+        type: "session.next.prompt.revised"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+          prompt: Prompt
+        }
+      }
+    | {
+        id: string
         type: "session.next.context.updated"
         properties: {
           timestamp: number
@@ -1613,6 +1634,8 @@ export type GlobalEvent = {
     | SyncEventSessionNextMoved
     | SyncEventSessionNextPrompted
     | SyncEventSessionNextPromptAdmitted
+    | SyncEventSessionNextPromptWithdrawn
+    | SyncEventSessionNextPromptRevised
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
     | SyncEventSessionNextShellStarted
@@ -2747,6 +2770,8 @@ export type SessionDurableEvent =
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
+  | SessionNextPromptWithdrawn
+  | SessionNextPromptRevised
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -2874,6 +2899,8 @@ export type V2Event =
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
+  | SessionNextPromptWithdrawn
+  | SessionNextPromptRevised
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -3398,6 +3425,39 @@ export type SyncEventSessionNextPromptAdmitted = {
       messageID: string
       prompt: Prompt
       delivery: "steer" | "queue"
+    }
+  }
+}
+
+export type SyncEventSessionNextPromptWithdrawn = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.prompt.withdrawn.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+    }
+  }
+}
+
+export type SyncEventSessionNextPromptRevised = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.prompt.revised.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+      prompt: Prompt
     }
   }
 }
@@ -3973,6 +4033,7 @@ export type SessionInputAdmitted = {
   delivery: "steer" | "queue"
   timeCreated: number
   promotedSeq?: number
+  withdrawnSeq?: number
 }
 
 export type SessionMessageAgentSwitched = {
@@ -4290,6 +4351,45 @@ export type SessionNextPromptAdmitted = {
     messageID: string
     prompt: Prompt
     delivery: "steer" | "queue"
+  }
+}
+
+export type SessionNextPromptWithdrawn = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.prompt.withdrawn"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+  }
+}
+
+export type SessionNextPromptRevised = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.prompt.revised"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    prompt: Prompt
   }
 }
 
@@ -6351,6 +6451,27 @@ export type EventSessionNextPromptAdmitted = {
     messageID: string
     prompt: Prompt
     delivery: "steer" | "queue"
+  }
+}
+
+export type EventSessionNextPromptWithdrawn = {
+  id: string
+  type: "session.next.prompt.withdrawn"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+  }
+}
+
+export type EventSessionNextPromptRevised = {
+  id: string
+  type: "session.next.prompt.revised"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    prompt: Prompt
   }
 }
 
@@ -11681,6 +11802,127 @@ export type V2SessionPromptResponses = {
 }
 
 export type V2SessionPromptResponse = V2SessionPromptResponses[keyof V2SessionPromptResponses]
+
+export type V2SessionInputListData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/input"
+}
+
+export type V2SessionInputListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+}
+
+export type V2SessionInputListError = V2SessionInputListErrors[keyof V2SessionInputListErrors]
+
+export type V2SessionInputListResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: Array<SessionInputAdmitted>
+  }
+}
+
+export type V2SessionInputListResponse = V2SessionInputListResponses[keyof V2SessionInputListResponses]
+
+export type V2SessionInputWithdrawData = {
+  body?: never
+  path: {
+    sessionID: string
+    messageID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/input/{messageID}"
+}
+
+export type V2SessionInputWithdrawErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * ConflictError
+   */
+  409: ConflictError
+}
+
+export type V2SessionInputWithdrawError = V2SessionInputWithdrawErrors[keyof V2SessionInputWithdrawErrors]
+
+export type V2SessionInputWithdrawResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2SessionInputWithdrawResponse = V2SessionInputWithdrawResponses[keyof V2SessionInputWithdrawResponses]
+
+export type V2SessionInputReviseData = {
+  body: {
+    prompt: PromptInput
+  }
+  path: {
+    sessionID: string
+    messageID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/input/{messageID}"
+}
+
+export type V2SessionInputReviseErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * ConflictError
+   */
+  409: ConflictError
+}
+
+export type V2SessionInputReviseError = V2SessionInputReviseErrors[keyof V2SessionInputReviseErrors]
+
+export type V2SessionInputReviseResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: SessionInputAdmitted
+  }
+}
+
+export type V2SessionInputReviseResponse = V2SessionInputReviseResponses[keyof V2SessionInputReviseResponses]
 
 export type V2SessionCompactData = {
   body?: never

@@ -484,3 +484,155 @@ test("projects live context updates with their message ID", async () => {
     app.renderer.destroy()
   }
 })
+
+test("tracks pending inputs from admission until promotion, withdrawal, or revision", async () => {
+  const events = createEventSource()
+  const calls = createFetch(undefined, events)
+  let sync!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    sync = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  const admit = (messageID: string, text: string) =>
+    emitEvent(events, {
+      id: `evt_admitted_${messageID}`,
+      type: "session.next.prompt.admitted",
+      properties: { sessionID: "session-1", messageID, timestamp: 0, prompt: { text }, delivery: "queue" },
+    })
+  const pending = () => (sync.session.input.list("session-1") ?? []).map((input) => [input.id, input.prompt.text])
+
+  try {
+    await mounted
+    admit("msg_a", "first")
+    admit("msg_b", "secnod")
+    admit("msg_c", "third")
+    await wait(() => pending().length === 3)
+    expect(pending()).toEqual([
+      ["msg_a", "first"],
+      ["msg_b", "secnod"],
+      ["msg_c", "third"],
+    ])
+
+    emitEvent(events, {
+      id: "evt_revised_b",
+      type: "session.next.prompt.revised",
+      properties: { sessionID: "session-1", messageID: "msg_b", timestamp: 1, prompt: { text: "second" } },
+    })
+    emitEvent(events, {
+      id: "evt_withdrawn_c",
+      type: "session.next.prompt.withdrawn",
+      properties: { sessionID: "session-1", messageID: "msg_c", timestamp: 1 },
+    })
+    emitEvent(events, {
+      id: "evt_prompted_a",
+      type: "session.next.prompted",
+      properties: {
+        sessionID: "session-1",
+        messageID: "msg_a",
+        timestamp: 2,
+        prompt: { text: "first" },
+        delivery: "queue",
+      },
+    })
+
+    await wait(() => sync.session.message.list("session-1")?.length === 1)
+    expect(pending()).toEqual([["msg_b", "second"]])
+    expect(sync.session.message.list("session-1")?.[0]).toMatchObject({ id: "msg_a", text: "first" })
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("withdraws and revises pending inputs through the v2 input routes", async () => {
+  const events = createEventSource()
+  const requests: { method: string; path: string; body?: unknown }[] = []
+  const admitted = (id: string, text: string) => ({
+    admittedSeq: 1,
+    id,
+    sessionID: "session-1",
+    prompt: { text },
+    delivery: "queue",
+    timeCreated: 0,
+  })
+  const base = createFetch((url) => {
+    if (url.pathname === "/api/session/session-1/input")
+      return json({ data: [admitted("msg_a", "tpyo"), admitted("msg_b", "remove me")] })
+    return undefined
+  }, events)
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(String(input), init)
+    const url = new URL(request.url)
+    if (url.pathname.startsWith("/api/session/session-1/input/")) {
+      const body = request.method === "PATCH" ? await request.json() : undefined
+      requests.push({ method: request.method, path: url.pathname, body })
+      if (url.pathname.endsWith("/msg_gone"))
+        return json({ _tag: "ConflictError", message: "no longer pending" }, { status: 409 })
+      if (request.method === "DELETE") return new Response(null, { status: 204 })
+      return json({ data: { ...admitted("msg_a", "typo") } })
+    }
+    return base.fetch(input, init)
+  }) as typeof globalThis.fetch
+  let sync!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    sync = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={fetch}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await mounted
+    await sync.session.input.refresh("session-1")
+    await sync.session.input.revise("session-1", "msg_a", { text: "typo" })
+    await sync.session.input.withdraw("session-1", "msg_b")
+
+    expect(requests).toEqual([
+      { method: "PATCH", path: "/api/session/session-1/input/msg_a", body: { prompt: { text: "typo" } } },
+      { method: "DELETE", path: "/api/session/session-1/input/msg_b", body: undefined },
+    ])
+    expect((sync.session.input.list("session-1") ?? []).map((input) => [input.id, input.prompt.text])).toEqual([
+      ["msg_a", "typo"],
+    ])
+
+    // A promotion that wins the race surfaces as a conflict and leaves local state untouched.
+    await expect(sync.session.input.withdraw("session-1", "msg_gone")).rejects.toBeDefined()
+    expect(sync.session.input.list("session-1")).toHaveLength(1)
+  } finally {
+    app.renderer.destroy()
+  }
+})

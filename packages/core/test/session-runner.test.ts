@@ -2096,6 +2096,167 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.effect("never runs a queued input withdrawn during the active drain", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Start working" }), resume: false })
+
+      requests.length = 0
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+      ]
+      streamGate = yield* Deferred.make<void>()
+      streamStarted = yield* Deferred.make<void>()
+
+      const first = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* Deferred.await(streamStarted)
+      const removed = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Changed my mind" }),
+        delivery: "queue",
+      })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue second" }), delivery: "queue" })
+      yield* session.withdraw({ sessionID, messageID: removed.id })
+      yield* Deferred.succeed(streamGate, undefined)
+      yield* Fiber.join(first)
+      streamGate = undefined
+      streamStarted = undefined
+
+      expect(requests).toHaveLength(2)
+      expect(userTexts(requests[0]!)).toEqual(["Start working"])
+      expect(userTexts(requests[1]!)).toEqual(["Start working", "Queue second"])
+      expect(yield* session.pending(sessionID)).toEqual([])
+    }),
+  )
+
+  it.effect("runs no extra provider turn when the only queued input is withdrawn", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Start working" }), resume: false })
+
+      requests.length = 0
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+      ]
+      streamGate = yield* Deferred.make<void>()
+      streamStarted = yield* Deferred.make<void>()
+
+      const first = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* Deferred.await(streamStarted)
+      const removed = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Never mind" }),
+        delivery: "queue",
+      })
+      yield* session.withdraw({ sessionID, messageID: removed.id })
+      yield* Deferred.succeed(streamGate, undefined)
+      yield* Fiber.join(first)
+      streamGate = undefined
+      streamStarted = undefined
+
+      // The coalesced wake from the queued prompt drains within the same ownership and finds nothing to run.
+      expect(requests).toHaveLength(1)
+      expect(userTexts(requests[0]!)).toEqual(["Start working"])
+      expect((yield* session.context(sessionID)).filter((message) => message.type === "user")).toHaveLength(1)
+    }),
+  )
+
+  it.effect("rejects withdrawing a steer already promoted into the running drain", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Start working" }), resume: false })
+
+      requests.length = 0
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: "call-echo", name: "echo", input: { text: "hello" } }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        ],
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+      ]
+      streamGate = yield* Deferred.make<void>()
+      streamStarted = yield* Deferred.make<void>()
+
+      const first = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* Deferred.await(streamStarted)
+      const steer = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Change direction" }) })
+      yield* Deferred.succeed(streamGate, undefined)
+      yield* Fiber.join(first)
+      streamGate = undefined
+      streamStarted = undefined
+
+      expect(yield* session.withdraw({ sessionID, messageID: steer.id }).pipe(Effect.flip)).toBeInstanceOf(
+        SessionV2.InputNotPendingError,
+      )
+      expect(userTexts(requests[1]!)).toEqual(["Start working", "Change direction"])
+      expect(
+        (yield* session.context(sessionID)).flatMap((message) => (message.type === "user" ? [message.text] : [])),
+      ).toEqual(["Start working", "Change direction"])
+    }),
+  )
+
+  it.effect("runs the revised prompt of a queued input edited during the active drain", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Start working" }), resume: false })
+
+      requests.length = 0
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+      ]
+      streamGate = yield* Deferred.make<void>()
+      streamStarted = yield* Deferred.make<void>()
+
+      const first = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* Deferred.await(streamStarted)
+      const queued = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Fix the tpyo" }),
+        delivery: "queue",
+      })
+      yield* session.revise({ sessionID, messageID: queued.id, prompt: { text: "Fix the typo" } })
+      yield* Deferred.succeed(streamGate, undefined)
+      yield* Fiber.join(first)
+      streamGate = undefined
+      streamStarted = undefined
+
+      expect(requests).toHaveLength(2)
+      expect(userTexts(requests[1]!)).toEqual(["Start working", "Fix the typo"])
+    }),
+  )
+
   it.effect("promotes queued input after steering continuation ends", () =>
     Effect.gen(function* () {
       yield* setup

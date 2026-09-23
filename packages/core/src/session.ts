@@ -107,10 +107,22 @@ export class PromptConflictError extends Schema.TaggedErrorClass<PromptConflictE
   sessionID: SessionSchema.ID,
   messageID: SessionMessage.ID,
 }) {}
+export class InputNotPendingError extends Schema.TaggedErrorClass<InputNotPendingError>()(
+  "Session.InputNotPendingError",
+  {
+    sessionID: SessionSchema.ID,
+    messageID: SessionMessage.ID,
+  },
+) {}
 export const MessageNotFoundError = SessionRevert.MessageNotFoundError
 export type MessageNotFoundError = SessionRevert.MessageNotFoundError
 
-export type Error = NotFoundError | MessageDecodeError | OperationUnavailableError | PromptConflictError
+export type Error =
+  | NotFoundError
+  | MessageDecodeError
+  | OperationUnavailableError
+  | PromptConflictError
+  | InputNotPendingError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
@@ -154,6 +166,19 @@ export interface Interface {
     delivery?: SessionInput.Delivery
     resume?: boolean
   }) => Effect.Effect<SessionInput.Admitted, NotFoundError | PromptConflictError>
+  /** Admitted inputs not yet promoted into visible messages, in promotion order. */
+  readonly pending: (sessionID: SessionSchema.ID) => Effect.Effect<SessionInput.Admitted[], NotFoundError>
+  /** Withdraws one admitted input before promotion so it never runs. */
+  readonly withdraw: (input: {
+    sessionID: SessionSchema.ID
+    messageID: SessionMessage.ID
+  }) => Effect.Effect<void, NotFoundError | InputNotPendingError>
+  /** Replaces the prompt of one admitted input before promotion, keeping its delivery and position. */
+  readonly revise: (input: {
+    sessionID: SessionSchema.ID
+    messageID: SessionMessage.ID
+    prompt: PromptInput.Prompt
+  }) => Effect.Effect<SessionInput.Admitted, NotFoundError | InputNotPendingError>
   readonly shell: (input: {
     id?: EventV2.ID
     sessionID: SessionSchema.ID
@@ -392,13 +417,43 @@ const layer = Layer.effect(
                   : Effect.die(defect),
               ),
             )
-            if (!SessionInput.equivalent(admitted, expected))
+            // A withdrawn ID stays reserved so a late retry cannot resurrect input the user removed.
+            if (admitted.withdrawnSeq !== undefined || !SessionInput.equivalent(admitted, expected))
               return yield* new PromptConflictError({ sessionID: input.sessionID, messageID })
             if (input.resume !== false) yield* execution.wake(admitted.sessionID)
             return admitted
           }),
         ),
       ),
+      pending: Effect.fn("V2Session.pending")(function* (sessionID) {
+        yield* result.get(sessionID)
+        return yield* SessionInput.listPending(db, sessionID)
+      }),
+      withdraw: Effect.fn("V2Session.withdraw")(function* (input) {
+        yield* result.get(input.sessionID)
+        yield* SessionInput.withdraw(events, { id: input.messageID, sessionID: input.sessionID }).pipe(
+          Effect.catchTag(
+            "SessionInput.NotPending",
+            () => new InputNotPendingError({ sessionID: input.sessionID, messageID: input.messageID }),
+          ),
+        )
+      }),
+      revise: Effect.fn("V2Session.revise")(function* (input) {
+        yield* result.get(input.sessionID)
+        yield* SessionInput.revise(events, {
+          id: input.messageID,
+          sessionID: input.sessionID,
+          prompt: resolvePrompt(input.prompt),
+        }).pipe(
+          Effect.catchTag(
+            "SessionInput.NotPending",
+            () => new InputNotPendingError({ sessionID: input.sessionID, messageID: input.messageID }),
+          ),
+        )
+        const revised = yield* SessionInput.find(db, input.messageID)
+        if (!revised) return yield* Effect.die("Revised session input is missing")
+        return revised
+      }),
       shell: Effect.fn("V2Session.shell")(function* () {
         return yield* new OperationUnavailableError({ operation: "shell" })
       }),

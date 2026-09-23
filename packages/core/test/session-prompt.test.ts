@@ -583,3 +583,248 @@ describe("SessionV2.prompt", () => {
     }),
   )
 })
+
+const userTexts = (messages: SessionMessage.Message[]) =>
+  messages.flatMap((message) => (message.type === "user" ? [message.text] : []))
+
+describe("SessionV2 pending input", () => {
+  it.effect("lists admitted inputs until they are promoted", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const { db } = yield* Database.Service
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const steer = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Steer" }), resume: false })
+      const queued = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Queued" }),
+        delivery: "queue",
+        resume: false,
+      })
+
+      expect((yield* session.pending(sessionID)).map((input) => input.id)).toEqual([steer.id, queued.id])
+
+      yield* SessionInput.promoteSteers(db, events, sessionID, Number.MAX_SAFE_INTEGER)
+      expect((yield* session.pending(sessionID)).map((input) => input.id)).toEqual([queued.id])
+    }),
+  )
+
+  it.effect("withdraws a queued input so promotion skips it", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const { db } = yield* Database.Service
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const first = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Remove me" }),
+        delivery: "queue",
+        resume: false,
+      })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Keep me" }), delivery: "queue", resume: false })
+
+      yield* session.withdraw({ sessionID, messageID: first.id })
+
+      expect((yield* session.pending(sessionID)).map((input) => input.prompt.text)).toEqual(["Keep me"])
+      expect((yield* admitted(first.id))?.withdrawnSeq).toBeNumber()
+      expect(yield* SessionInput.promoteNextQueued(db, events, sessionID)).toBe(true)
+      expect(yield* SessionInput.promoteNextQueued(db, events, sessionID)).toBe(false)
+      expect(userTexts(yield* session.messages({ sessionID }))).toEqual(["Keep me"])
+    }),
+  )
+
+  it.effect("rejects withdrawing an input that was already promoted", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const { db } = yield* Database.Service
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const input = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Already running" }),
+        resume: false,
+      })
+      yield* SessionInput.promoteSteers(db, events, sessionID, Number.MAX_SAFE_INTEGER)
+
+      const error = yield* session.withdraw({ sessionID, messageID: input.id }).pipe(Effect.flip)
+
+      expect(error).toBeInstanceOf(SessionV2.InputNotPendingError)
+      expect((yield* admitted(input.id))?.promotedSeq).toBeNumber()
+      expect((yield* admitted(input.id))?.withdrawnSeq).toBeUndefined()
+      expect(userTexts(yield* session.messages({ sessionID }))).toEqual(["Already running"])
+      expect(yield* eventCount(EventV2.versionedType(SessionEvent.PromptWithdrawn.type, 1))).toBe(0)
+    }),
+  )
+
+  it.effect("refuses to project a promotion for a withdrawn input", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const input = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Withdrawn" }),
+        delivery: "queue",
+        resume: false,
+      })
+      yield* session.withdraw({ sessionID, messageID: input.id })
+
+      // Simulates a promotion that read the row before the withdraw committed.
+      const exit = yield* events
+        .publish(SessionEvent.Prompted, {
+          sessionID,
+          messageID: input.id,
+          timestamp: input.timeCreated,
+          prompt: input.prompt,
+          delivery: input.delivery,
+        })
+        .pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      expect((yield* admitted(input.id))?.promotedSeq).toBeUndefined()
+      expect(yield* session.messages({ sessionID })).toEqual([])
+    }),
+  )
+
+  it.effect("rejects withdrawing twice or withdrawing an unknown input", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const input = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Once" }),
+        delivery: "queue",
+        resume: false,
+      })
+      yield* session.withdraw({ sessionID, messageID: input.id })
+
+      expect(yield* session.withdraw({ sessionID, messageID: input.id }).pipe(Effect.flip)).toBeInstanceOf(
+        SessionV2.InputNotPendingError,
+      )
+      expect(
+        yield* session.withdraw({ sessionID, messageID: SessionMessage.ID.create() }).pipe(Effect.flip),
+      ).toBeInstanceOf(SessionV2.InputNotPendingError)
+      expect(yield* eventCount(EventV2.versionedType(SessionEvent.PromptWithdrawn.type, 1))).toBe(1)
+    }),
+  )
+
+  it.effect("rejects withdrawing another Session's input", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const { db } = yield* Database.Service
+      const session = yield* SessionV2.Service
+      const otherID = SessionV2.ID.make("ses_prompt_other")
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: otherID,
+          project_id: Project.ID.global,
+          slug: "other",
+          directory: "/project",
+          title: "other",
+          version: "test",
+        })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie)
+      const input = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Mine" }),
+        delivery: "queue",
+        resume: false,
+      })
+
+      expect(yield* session.withdraw({ sessionID: otherID, messageID: input.id }).pipe(Effect.flip)).toBeInstanceOf(
+        SessionV2.InputNotPendingError,
+      )
+      expect((yield* session.pending(sessionID)).map((pending) => pending.id)).toEqual([input.id])
+    }),
+  )
+
+  it.effect("keeps a withdrawn message ID reserved against retries", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const input = {
+        id: messageID,
+        sessionID,
+        prompt: Prompt.make({ text: "Retry me" }),
+        delivery: "queue" as const,
+        resume: false,
+      }
+      yield* session.prompt(input)
+      yield* session.withdraw({ sessionID, messageID })
+
+      expect(yield* session.prompt(input).pipe(Effect.flip)).toBeInstanceOf(SessionV2.PromptConflictError)
+      expect(yield* session.pending(sessionID)).toEqual([])
+    }),
+  )
+
+  it.effect("revises a pending input in place and promotes the revised prompt", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const { db } = yield* Database.Service
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const first = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Fix the tpyo" }),
+        delivery: "queue",
+        resume: false,
+      })
+      const second = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Then this" }),
+        delivery: "queue",
+        resume: false,
+      })
+
+      const revised = yield* session.revise({ sessionID, messageID: first.id, prompt: { text: "Fix the typo" } })
+
+      expect(revised).toMatchObject({ id: first.id, delivery: "queue", admittedSeq: first.admittedSeq })
+      expect(revised.prompt.text).toBe("Fix the typo")
+      expect((yield* session.pending(sessionID)).map((input) => [input.id, input.prompt.text])).toEqual([
+        [first.id, "Fix the typo"],
+        [second.id, "Then this"],
+      ])
+      yield* SessionInput.promoteNextQueued(db, events, sessionID)
+      expect(userTexts(yield* session.messages({ sessionID }))).toEqual(["Fix the typo"])
+    }),
+  )
+
+  it.effect("rejects revising an input that was already promoted", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const { db } = yield* Database.Service
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const input = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Original" }), resume: false })
+      yield* SessionInput.promoteSteers(db, events, sessionID, Number.MAX_SAFE_INTEGER)
+
+      expect(
+        yield* session.revise({ sessionID, messageID: input.id, prompt: { text: "Too late" } }).pipe(Effect.flip),
+      ).toBeInstanceOf(SessionV2.InputNotPendingError)
+      expect((yield* admitted(input.id))?.prompt.text).toBe("Original")
+      expect(userTexts(yield* session.messages({ sessionID }))).toEqual(["Original"])
+    }),
+  )
+
+  it.effect("rejects revising a withdrawn input", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const input = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Gone" }),
+        delivery: "queue",
+        resume: false,
+      })
+      yield* session.withdraw({ sessionID, messageID: input.id })
+
+      expect(
+        yield* session.revise({ sessionID, messageID: input.id, prompt: { text: "Back" } }).pipe(Effect.flip),
+      ).toBeInstanceOf(SessionV2.InputNotPendingError)
+      expect(yield* session.pending(sessionID)).toEqual([])
+    }),
+  )
+})

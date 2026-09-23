@@ -349,6 +349,12 @@ import type {
   V2SessionGetResponses,
   V2SessionHistoryErrors,
   V2SessionHistoryResponses,
+  V2SessionInputListErrors,
+  V2SessionInputListResponses,
+  V2SessionInputReviseErrors,
+  V2SessionInputReviseResponses,
+  V2SessionInputWithdrawErrors,
+  V2SessionInputWithdrawResponses,
   V2SessionInterruptErrors,
   V2SessionInterruptResponses,
   V2SessionListErrors,
@@ -5091,6 +5097,102 @@ export class Agent extends HeyApiClient {
   }
 }
 
+export class Input extends HeyApiClient {
+  /**
+   * List pending inputs
+   *
+   * List admitted inputs that have not been promoted into visible messages, in promotion order.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
+    return (options?.client ?? this.client).get<V2SessionInputListResponses, V2SessionInputListErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/input",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Remove pending input
+   *
+   * Withdraw an admitted input before it is promoted so it never runs. Fails with a conflict once the input was promoted or withdrawn.
+   */
+  public withdraw<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      messageID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "messageID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<
+      V2SessionInputWithdrawResponses,
+      V2SessionInputWithdrawErrors,
+      ThrowOnError
+    >({
+      url: "/api/session/{sessionID}/input/{messageID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Edit pending input
+   *
+   * Replace the prompt of an admitted input before it is promoted, keeping its delivery and position. Fails with a conflict once the input was promoted or withdrawn.
+   */
+  public revise<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      messageID: string
+      prompt?: PromptInput
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "messageID" },
+            { in: "body", key: "prompt" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).patch<
+      V2SessionInputReviseResponses,
+      V2SessionInputReviseErrors,
+      ThrowOnError
+    >({
+      url: "/api/session/{sessionID}/input/{messageID}",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
 export class Revert extends HeyApiClient {
   /**
    * Stage session revert
@@ -5882,6 +5984,11 @@ export class Session3 extends HeyApiClient {
       ...options,
       ...params,
     })
+  }
+
+  private _input?: Input
+  get input(): Input {
+    return (this._input ??= new Input({ client: this.client }))
   }
 
   private _revert?: Revert

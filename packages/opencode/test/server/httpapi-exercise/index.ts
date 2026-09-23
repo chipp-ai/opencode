@@ -1152,6 +1152,37 @@ const scenarios: Scenario[] = [
     }))
     .status(400, undefined, "none"),
   http.protected
+    .get("/api/session/{sessionID}/input", "v2.session.input.list")
+    .seeded((ctx) => ctx.session({ title: "Pending inputs" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/input", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, data(array)),
+  http.protected
+    .patch("/api/session/{sessionID}/input/{messageID}", "v2.session.input.revise")
+    .seeded((ctx) => ctx.session({ title: "Revise missing input" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/input/{messageID}", {
+        sessionID: ctx.state.id,
+        messageID: "msg_httpapi_missing",
+      }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: { prompt: { text: "Revised" } },
+    }))
+    .json(409, object, "status"),
+  http.protected
+    .delete("/api/session/{sessionID}/input/{messageID}", "v2.session.input.withdraw")
+    .seeded((ctx) => ctx.session({ title: "Withdraw missing input" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/input/{messageID}", {
+        sessionID: ctx.state.id,
+        messageID: "msg_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .json(409, object, "status"),
+  http.protected
     .post("/api/session/{sessionID}/compact", "v2.session.compact")
     .at((ctx) => ({
       path: route("/api/session/{sessionID}/compact", { sessionID: "ses_httpapi_missing" }),

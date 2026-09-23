@@ -42,6 +42,7 @@ import {
 } from "../../prompt/part"
 import { usePromptStash } from "../../prompt/stash"
 import { DialogStash } from "../dialog-stash"
+import { DialogQueuedInput } from "../dialog-queued-input"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
@@ -534,6 +535,20 @@ export function Prompt(props: PromptProps) {
           })
           restoreExtmarksFromParts(updatedNonTextParts)
           input.cursorOffset = Bun.stringWidth(normalized)
+        },
+      },
+      {
+        title: "Queued messages",
+        desc: "Edit or remove messages waiting to run",
+        name: "session.queue",
+        category: "Session",
+        slashName: "queue",
+        slashAliases: ["unqueue"],
+        enabled: Boolean(props.sessionID),
+        run: () => {
+          const sessionID = props.sessionID
+          if (!sessionID) return
+          dialog.replace(() => <DialogQueuedInput sessionID={sessionID} />)
         },
       },
       {

@@ -149,6 +149,8 @@ export const SessionInputTable = sqliteTable(
     delivery: text().$type<SessionInput.Delivery>().notNull(),
     admitted_seq: integer().notNull(),
     promoted_seq: integer(),
+    // Tombstone for inputs withdrawn before promotion; the row keeps its ID so it can never be re-admitted.
+    withdrawn_seq: integer(),
     time_created: integer()
       .notNull()
       .$default(() => Date.now()),

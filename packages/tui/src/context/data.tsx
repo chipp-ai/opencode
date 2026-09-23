@@ -14,6 +14,7 @@ import type {
   SessionMessageAssistantReasoning,
   SessionMessageAssistantText,
   SessionMessageAssistantTool,
+  SessionInputAdmitted,
   SessionV2Info,
   SkillV2Info,
   V2Event,
@@ -38,6 +39,7 @@ type Data = {
   session: {
     info: Record<string, SessionV2Info>
     message: Record<string, SessionMessage[]>
+    input: Record<string, SessionInputAdmitted[]>
     permission: Record<string, PermissionV2Request[]>
     question: Record<string, QuestionV2Request[]>
   }
@@ -62,6 +64,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       session: {
         info: {},
         message: {},
+        input: {},
         permission: {},
         question: {},
       },
@@ -121,6 +124,11 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       },
     }
 
+    function removeInput(sessionID: string, messageID: string) {
+      if (!store.session.input[sessionID]?.some((input) => input.id === messageID)) return
+      setStore("session", "input", sessionID, (inputs) => inputs.filter((input) => input.id !== messageID))
+    }
+
     function handleEvent(event: V2Event) {
       switch (event.type) {
         case "catalog.updated":
@@ -150,6 +158,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           })
           break
         case "session.next.prompted": {
+          removeInput(event.data.sessionID, event.data.messageID)
           message.update(event.data.sessionID, (draft) => {
             message.prepend(draft, {
               id: event.data.messageID,
@@ -163,6 +172,35 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           break
         }
         case "session.next.prompt.admitted":
+          setStore(
+            "session",
+            "input",
+            produce((draft) => {
+              const inputs = (draft[event.data.sessionID] ??= [])
+              if (inputs.some((input) => input.id === event.data.messageID)) return
+              inputs.push({
+                admittedSeq: event.durable?.seq ?? Number.MAX_SAFE_INTEGER,
+                id: event.data.messageID,
+                sessionID: event.data.sessionID,
+                prompt: event.data.prompt,
+                delivery: event.data.delivery,
+                timeCreated: event.data.timestamp,
+              })
+            }),
+          )
+          break
+        case "session.next.prompt.withdrawn":
+          removeInput(event.data.sessionID, event.data.messageID)
+          break
+        case "session.next.prompt.revised":
+          setStore(
+            "session",
+            "input",
+            event.data.sessionID,
+            (input) => input.id === event.data.messageID,
+            "prompt",
+            event.data.prompt,
+          )
           break
         case "session.next.context.updated":
           message.update(event.data.sessionID, (draft) => {
@@ -429,6 +467,40 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(sessionID: string) {
             const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
             setStore("session", "message", sessionID, result.data.data)
+          },
+        },
+        input: {
+          /** Admitted inputs not yet promoted into visible messages, in promotion order. */
+          list(sessionID: string) {
+            return store.session.input[sessionID]
+          },
+          async refresh(sessionID: string) {
+            const result = await sdk.client.v2.session.input.list({ sessionID }, { throwOnError: true })
+            setStore("session", "input", sessionID, result.data.data)
+          },
+          async withdraw(sessionID: string, messageID: string) {
+            await sdk.client.v2.session.input.withdraw({ sessionID, messageID }, { throwOnError: true })
+            removeInput(sessionID, messageID)
+          },
+          async revise(sessionID: string, messageID: string, prompt: SessionInputAdmitted["prompt"]) {
+            const result = await sdk.client.v2.session.input.revise(
+              {
+                sessionID,
+                messageID,
+                prompt: {
+                  text: prompt.text,
+                  files: prompt.files?.map((file) => ({
+                    uri: file.uri,
+                    name: file.name,
+                    description: file.description,
+                    source: file.source,
+                  })),
+                  agents: prompt.agents,
+                },
+              },
+              { throwOnError: true },
+            )
+            setStore("session", "input", sessionID, (input) => input.id === messageID, result.data.data)
           },
         },
         permission: {

@@ -20,4 +20,5 @@ export const Admitted = Schema.Struct({
   delivery: Delivery,
   timeCreated: DateTimeUtcFromMillis,
   promotedSeq: NonNegativeInt.pipe(optional),
+  withdrawnSeq: NonNegativeInt.pipe(optional),
 }).annotate({ identifier: "SessionInput.Admitted" })

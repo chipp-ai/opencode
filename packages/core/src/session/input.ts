@@ -27,6 +27,7 @@ const fromRow = (row: typeof SessionInputTable.$inferSelect): Admitted =>
     delivery: row.delivery,
     timeCreated: DateTime.makeUnsafe(row.time_created),
     ...(row.promoted_seq === null ? {} : { promotedSeq: row.promoted_seq }),
+    ...(row.withdrawn_seq === null ? {} : { withdrawnSeq: row.withdrawn_seq }),
   })
 
 export const find = Effect.fn("SessionInput.find")(function* (db: DatabaseService, id: SessionMessage.ID) {
@@ -134,6 +135,7 @@ export const projectPrompted = Effect.fn("SessionInput.projectPrompted")(functio
         eq(SessionInputTable.id, input.id),
         eq(SessionInputTable.session_id, input.sessionID),
         isNull(SessionInputTable.promoted_seq),
+        isNull(SessionInputTable.withdrawn_seq),
       ),
     )
     .returning()
@@ -147,6 +149,7 @@ export const projectPrompted = Effect.fn("SessionInput.projectPrompted")(functio
 
   const stored = yield* find(db, input.id)
   if (stored) {
+    if (stored.withdrawnSeq !== undefined) return yield* Effect.die(new LifecycleConflict({ id: input.id }))
     if (!matchesProjection(stored, input) || stored.promotedSeq !== input.promotedSeq)
       return yield* Effect.die(new LifecycleConflict({ id: input.id }))
     return
@@ -167,6 +170,96 @@ export const projectPrompted = Effect.fn("SessionInput.projectPrompted")(functio
     .pipe(Effect.orDie)
 })
 
+export class NotPending extends Schema.TaggedErrorClass<NotPending>()("SessionInput.NotPending", {
+  id: SessionMessage.ID,
+}) {}
+
+/** Lists admitted inputs that have been neither promoted nor withdrawn, in promotion order. */
+export const listPending = Effect.fn("SessionInput.listPending")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  const rows = yield* db
+    .select()
+    .from(SessionInputTable)
+    .where(
+      and(
+        eq(SessionInputTable.session_id, sessionID),
+        isNull(SessionInputTable.promoted_seq),
+        isNull(SessionInputTable.withdrawn_seq),
+      ),
+    )
+    .orderBy(asc(SessionInputTable.admitted_seq))
+    .all()
+    .pipe(Effect.orDie)
+  return rows.map(fromRow)
+})
+
+/** Withdraws one pending input. Fails with NotPending once the input was promoted, withdrawn, or never admitted. */
+export const withdraw = Effect.fn("SessionInput.withdraw")(function* (
+  events: EventV2.Interface,
+  input: { readonly id: SessionMessage.ID; readonly sessionID: SessionSchema.ID },
+) {
+  yield* events
+    .publish(SessionEvent.PromptWithdrawn, {
+      sessionID: input.sessionID,
+      messageID: input.id,
+      timestamp: yield* DateTime.now,
+    })
+    .pipe(Effect.catchDefect((defect) => (defect instanceof NotPending ? Effect.fail(defect) : Effect.die(defect))))
+})
+
+/** Replaces the prompt of one pending input, keeping its delivery and queue position. */
+export const revise = Effect.fn("SessionInput.revise")(function* (
+  events: EventV2.Interface,
+  input: { readonly id: SessionMessage.ID; readonly sessionID: SessionSchema.ID; readonly prompt: Prompt },
+) {
+  yield* events
+    .publish(SessionEvent.PromptRevised, {
+      sessionID: input.sessionID,
+      messageID: input.id,
+      prompt: input.prompt,
+      timestamp: yield* DateTime.now,
+    })
+    .pipe(Effect.catchDefect((defect) => (defect instanceof NotPending ? Effect.fail(defect) : Effect.die(defect))))
+})
+
+export const projectWithdrawn = Effect.fn("SessionInput.projectWithdrawn")(function* (
+  db: DatabaseService,
+  input: { readonly id: SessionMessage.ID; readonly sessionID: SessionSchema.ID; readonly withdrawnSeq: number },
+) {
+  const updated = yield* db
+    .update(SessionInputTable)
+    .set({ withdrawn_seq: input.withdrawnSeq })
+    .where(pendingRow(input))
+    .returning({ id: SessionInputTable.id })
+    .get()
+    .pipe(Effect.orDie)
+  if (!updated) return yield* Effect.die(new NotPending({ id: input.id }))
+})
+
+export const projectRevised = Effect.fn("SessionInput.projectRevised")(function* (
+  db: DatabaseService,
+  input: { readonly id: SessionMessage.ID; readonly sessionID: SessionSchema.ID; readonly prompt: Prompt },
+) {
+  const updated = yield* db
+    .update(SessionInputTable)
+    .set({ prompt: encodePrompt(input.prompt) })
+    .where(pendingRow(input))
+    .returning({ id: SessionInputTable.id })
+    .get()
+    .pipe(Effect.orDie)
+  if (!updated) return yield* Effect.die(new NotPending({ id: input.id }))
+})
+
+const pendingRow = (input: { readonly id: SessionMessage.ID; readonly sessionID: SessionSchema.ID }) =>
+  and(
+    eq(SessionInputTable.id, input.id),
+    eq(SessionInputTable.session_id, input.sessionID),
+    isNull(SessionInputTable.promoted_seq),
+    isNull(SessionInputTable.withdrawn_seq),
+  )
+
 export const hasPending = Effect.fn("SessionInput.hasPending")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
@@ -179,6 +272,7 @@ export const hasPending = Effect.fn("SessionInput.hasPending")(function* (
       and(
         eq(SessionInputTable.session_id, sessionID),
         isNull(SessionInputTable.promoted_seq),
+        isNull(SessionInputTable.withdrawn_seq),
         eq(SessionInputTable.delivery, delivery),
       ),
     )
@@ -219,28 +313,51 @@ const publish = Effect.fn("SessionInput.publish")(function* (
   sessionID: SessionSchema.ID,
   rows: ReadonlyArray<typeof SessionInputTable.$inferSelect>,
 ) {
+  let published = 0
   for (const row of rows) {
-    const id = SessionMessage.ID.make(row.id)
-    yield* events
-      .publish(SessionEvent.Prompted, {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(row.time_created),
-        messageID: id,
-        prompt: decodePrompt(row.prompt),
-        delivery: row.delivery,
-      })
-      .pipe(
-        Effect.catchDefect((defect) =>
-          defect instanceof LifecycleConflict
-            ? find(db, id).pipe(
-                Effect.flatMap((stored) => (stored?.promotedSeq === undefined ? Effect.die(defect) : Effect.void)),
-              )
-            : Effect.die(defect),
-        ),
-      )
+    if (yield* publishRow(db, events, sessionID, row)) published++
   }
-  return rows.length
+  return published
 })
+
+// Promotion reads pending rows outside the promotion transaction, so a withdraw or revise may commit in between.
+// The projection rejects the stale promotion; re-read the row to skip withdrawn inputs or promote the revised prompt.
+const publishRow = (
+  db: DatabaseService,
+  events: EventV2.Interface,
+  sessionID: SessionSchema.ID,
+  row: typeof SessionInputTable.$inferSelect,
+): Effect.Effect<boolean> => {
+  const id = SessionMessage.ID.make(row.id)
+  return events
+    .publish(SessionEvent.Prompted, {
+      sessionID,
+      timestamp: DateTime.makeUnsafe(row.time_created),
+      messageID: id,
+      prompt: decodePrompt(row.prompt),
+      delivery: row.delivery,
+    })
+    .pipe(
+      Effect.as(true),
+      Effect.catchDefect((defect) => {
+        if (!(defect instanceof LifecycleConflict)) return Effect.die(defect)
+        return db
+          .select()
+          .from(SessionInputTable)
+          .where(eq(SessionInputTable.id, id))
+          .get()
+          .pipe(
+            Effect.orDie,
+            Effect.flatMap((stored) => {
+              if (stored?.promoted_seq !== null && stored?.promoted_seq !== undefined) return Effect.succeed(false)
+              if (stored?.withdrawn_seq !== null && stored?.withdrawn_seq !== undefined) return Effect.succeed(false)
+              if (stored === undefined || stored.prompt === row.prompt) return Effect.die(defect)
+              return publishRow(db, events, sessionID, stored)
+            }),
+          )
+      }),
+    )
+}
 
 export const promoteSteers = Effect.fn("SessionInput.promoteSteers")(function* (
   db: DatabaseService,
@@ -255,6 +372,7 @@ export const promoteSteers = Effect.fn("SessionInput.promoteSteers")(function* (
       and(
         eq(SessionInputTable.session_id, sessionID),
         isNull(SessionInputTable.promoted_seq),
+        isNull(SessionInputTable.withdrawn_seq),
         eq(SessionInputTable.delivery, "steer"),
         lte(SessionInputTable.admitted_seq, cutoff),
       ),
@@ -265,7 +383,11 @@ export const promoteSteers = Effect.fn("SessionInput.promoteSteers")(function* (
   return yield* publish(db, events, sessionID, rows)
 })
 
-export const promoteNextQueued = Effect.fn("SessionInput.promoteNextQueued")(function* (
+export const promoteNextQueued: (
+  db: DatabaseService,
+  events: EventV2.Interface,
+  sessionID: SessionSchema.ID,
+) => Effect.Effect<boolean> = Effect.fn("SessionInput.promoteNextQueued")(function* (
   db: DatabaseService,
   events: EventV2.Interface,
   sessionID: SessionSchema.ID,
@@ -277,6 +399,7 @@ export const promoteNextQueued = Effect.fn("SessionInput.promoteNextQueued")(fun
       and(
         eq(SessionInputTable.session_id, sessionID),
         isNull(SessionInputTable.promoted_seq),
+        isNull(SessionInputTable.withdrawn_seq),
         eq(SessionInputTable.delivery, "queue"),
       ),
     )
@@ -284,5 +407,8 @@ export const promoteNextQueued = Effect.fn("SessionInput.promoteNextQueued")(fun
     .limit(1)
     .get()
     .pipe(Effect.orDie)
-  return row === undefined ? false : yield* publish(db, events, sessionID, [row]).pipe(Effect.as(true))
+  if (row === undefined) return false
+  // A withdraw may win the race after the read above; move on to the next queued input instead.
+  if (yield* publishRow(db, events, sessionID, row)) return true
+  return yield* promoteNextQueued(db, events, sessionID)
 })

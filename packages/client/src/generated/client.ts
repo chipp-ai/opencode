@@ -19,6 +19,12 @@ import type {
   SessionsSwitchModelOutput,
   SessionsPromptInput,
   SessionsPromptOutput,
+  SessionsListInputsInput,
+  SessionsListInputsOutput,
+  SessionsReviseInputInput,
+  SessionsReviseInputOutput,
+  SessionsWithdrawInputInput,
+  SessionsWithdrawInputOutput,
   SessionsCompactInput,
   SessionsCompactOutput,
   SessionsWaitInput,
@@ -398,6 +404,40 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ).then((value) => value.data),
+      listInputs: (input: SessionsListInputsInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SessionsListInputsOutput }>(
+          {
+            method: "GET",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/input`,
+            successStatus: 200,
+            declaredStatuses: [404, 400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      reviseInput: (input: SessionsReviseInputInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SessionsReviseInputOutput }>(
+          {
+            method: "PATCH",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/input/${encodeURIComponent(input.messageID)}`,
+            body: { prompt: input["prompt"] },
+            successStatus: 200,
+            declaredStatuses: [409, 404, 400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      withdrawInput: (input: SessionsWithdrawInputInput, requestOptions?: RequestOptions) =>
+        request<SessionsWithdrawInputOutput>(
+          {
+            method: "DELETE",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/input/${encodeURIComponent(input.messageID)}`,
+            successStatus: 204,
+            declaredStatuses: [409, 404, 400, 401],
+            empty: true,
+          },
+          requestOptions,
+        ),
       compact: (input: SessionsCompactInput, requestOptions?: RequestOptions) =>
         request<SessionsCompactOutput>(
           {

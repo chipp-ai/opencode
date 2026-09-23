@@ -187,6 +187,7 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
+      requireInput: boolean,
       recoverOverflow?: typeof compaction.compactAfterOverflow,
       tried: ReadonlyArray<ModelV2.Ref> = [],
     ) {
@@ -207,6 +208,8 @@ const layer = Layer.effect(
           promoted += yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
         }
         if (promoted > 0) currentStep = 1
+        // The input that justified this turn was withdrawn before promotion, so there is nothing new to answer.
+        if (requireInput && promoted === 0) return { needsContinuation: false, step: currentStep }
       }
       const system =
         initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
@@ -414,11 +417,18 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
+      requireInput: boolean,
       tried?: ReadonlyArray<ModelV2.Ref>,
     ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly step: number }, RunError>
 
-    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, tried) {
-      return yield* runTurnAttempt(sessionID, promotion, step, undefined, tried).pipe(
+    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (
+      sessionID,
+      promotion,
+      step,
+      requireInput,
+      tried,
+    ) {
+      return yield* runTurnAttempt(sessionID, promotion, step, requireInput, undefined, tried).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
@@ -429,6 +439,7 @@ const layer = Layer.effect(
               sessionID,
               undefined,
               defect.transition.step,
+              false,
               defect.transition._tag === "ContinueAfterFallback" ? defect.transition.tried : tried,
             )
           }),
@@ -436,18 +447,19 @@ const layer = Layer.effect(
       )
     })
 
-    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, tried) {
-      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow, tried).pipe(
+    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, requireInput, tried) {
+      return yield* runTurnAttempt(sessionID, promotion, step, requireInput, compaction.compactAfterOverflow, tried).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             yield* Effect.yieldNow
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
-              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, tried)
+              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, false, tried)
             return yield* runTurn(
               sessionID,
               undefined,
               defect.transition.step,
+              false,
               defect.transition._tag === "ContinueAfterFallback" ? defect.transition.tried : tried,
             )
           }),
@@ -465,16 +477,20 @@ const layer = Layer.effect(
       yield* failInterruptedTools(input.sessionID)
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
       let shouldRun = input.force || hasSteer || hasQueue
+      // Whether the next turn exists only to answer pending input, rather than a forced resume or tool continuation.
+      let requireInput = !input.force
       while (shouldRun) {
         let needsContinuation = true
         let step = 1
         while (needsContinuation) {
-          const result = yield* runTurn(input.sessionID, promotion, step)
+          const result = yield* runTurn(input.sessionID, promotion, step, requireInput)
           needsContinuation = result.needsContinuation
           step = result.step + 1
           promotion = "steer"
+          requireInput = !needsContinuation
           if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(db, input.sessionID, "steer")
         }
+        requireInput = true
         shouldRun = yield* SessionInput.hasPending(db, input.sessionID, "queue")
         promotion = shouldRun ? "queue" : undefined
       }

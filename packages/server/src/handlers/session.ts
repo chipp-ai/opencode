@@ -16,6 +16,20 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 const DefaultSessionsLimit = 50
 const DefaultSessionHistoryLimit = 50
 
+const inputErrors = {
+  "Session.NotFoundError": (error: SessionV2.NotFoundError) =>
+    Effect.fail(
+      new SessionNotFoundError({ sessionID: error.sessionID, message: `Session not found: ${error.sessionID}` }),
+    ),
+  "Session.InputNotPendingError": (error: SessionV2.InputNotPendingError) =>
+    Effect.fail(
+      new ConflictError({
+        message: `Session input is no longer pending (already promoted, withdrawn, or unknown): ${error.messageID}`,
+        resource: error.messageID,
+      }),
+    ),
+}
+
 export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handlers) =>
   Effect.gen(function* () {
     const session = yield* SessionV2.Service
@@ -184,6 +198,40 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 ),
               ),
           }
+        }),
+      )
+      .handle(
+        "session.input.list",
+        Effect.fn(function* (ctx) {
+          return {
+            data: yield* session.pending(ctx.params.sessionID).pipe(
+              Effect.catchTag("Session.NotFoundError", (error) =>
+                Effect.fail(
+                  new SessionNotFoundError({
+                    sessionID: error.sessionID,
+                    message: `Session not found: ${error.sessionID}`,
+                  }),
+                ),
+              ),
+            ),
+          }
+        }),
+      )
+      .handle(
+        "session.input.revise",
+        Effect.fn(function* (ctx) {
+          return {
+            data: yield* session
+              .revise({ ...ctx.params, prompt: ctx.payload.prompt })
+              .pipe(Effect.catchTags(inputErrors)),
+          }
+        }),
+      )
+      .handle(
+        "session.input.withdraw",
+        Effect.fn(function* (ctx) {
+          yield* session.withdraw(ctx.params).pipe(Effect.catchTags(inputErrors))
+          return HttpApiSchema.NoContent.make()
         }),
       )
       .handle(
