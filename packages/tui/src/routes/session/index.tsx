@@ -23,7 +23,7 @@ import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner } from "../../component/spinner"
-import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
+import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, tint, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
 import type {
@@ -82,6 +82,9 @@ import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { usePathFormatter } from "../../context/path-format"
 import { LocationProvider } from "../../context/location"
+import { createStore } from "solid-js/store"
+import { errorTarget, findMatches, highlightSegments, stepIndex } from "../../util/session-find"
+import { SessionFindBar } from "./find"
 
 addDefaultParsers(parsers.parsers)
 
@@ -117,6 +120,7 @@ const sessionBindingCommands = [
   "session.share",
   "session.rename",
   "session.timeline",
+  "session.find",
   "session.fork",
   "session.compact",
   "session.unshare",
@@ -154,6 +158,17 @@ const sessionGlobalBindingCommands = [
 
 const sessionGlobalUnfocusedBindingCommands = ["session.first", "session.last"] as const
 
+type FindMark = "current" | "match" | undefined
+
+// Rendered parts (markdown, tool rows) cannot highlight substrings, so find
+// matches tint the whole part background instead; plain user text also gets
+// inline substring highlights.
+function findBackground(theme: ReturnType<typeof useTheme>["theme"], mark: FindMark, fallback?: RGBA) {
+  if (mark === "current") return tint(theme.background, theme.warning, 0.3)
+  if (mark === "match") return tint(theme.background, theme.warning, 0.12)
+  return fallback
+}
+
 const context = createContext<{
   width: number
   sessionID: string
@@ -164,6 +179,8 @@ const context = createContext<{
   showDetails: () => boolean
   showGenericToolOutput: () => boolean
   diffWrapMode: () => "word" | "none"
+  findQuery: () => string
+  findMark: (id: string) => FindMark
   providers: () => ReadonlyMap<string, Provider>
   sync: ReturnType<typeof useSync>
   tui: ReturnType<typeof useTuiConfig>
@@ -428,6 +445,34 @@ export function Session() {
     }, 50)
   }
 
+  const [find, setFind] = createStore({ open: false, query: "", index: 0 })
+  // Newest match first so the first jump lands nearest the bottom of the
+  // transcript, like a terminal's reverse scrollback search.
+  const findResults = createMemo(() => {
+    if (!find.open) return []
+    return findMatches({
+      messages: messagesBeforeRevert(),
+      parts: (messageID) => sync.data.part[messageID] ?? [],
+      query: find.query,
+    }).toReversed()
+  })
+  // Clamp so streaming updates that shrink the result list keep a valid match.
+  const findIndex = createMemo(() => Math.min(find.index, Math.max(0, findResults().length - 1)))
+  const findCurrent = createMemo(() => findResults()[findIndex()]?.target)
+  const findTargets = createMemo(() => new Set(findResults().map((match) => match.target)))
+
+  function revealFindMatch() {
+    const target = findCurrent()
+    if (!target || !scroll || scroll.isDestroyed) return
+    const el = scroll.content.findDescendantById(target)
+    if (el) scroll.scrollBy(el.y - scroll.y - Math.floor(scroll.height / 3))
+  }
+
+  function stepFind(direction: 1 | -1) {
+    setFind("index", stepIndex(findIndex(), findResults().length, direction))
+    revealFindMatch()
+  }
+
   const local = useLocal()
 
   function enterChild(sessionID: string) {
@@ -535,6 +580,20 @@ export function Session() {
             setPrompt={(promptInfo) => prompt?.set(promptInfo)}
           />
         ))
+      },
+    },
+    {
+      title: "Find in session",
+      value: "session.find",
+      category: "Session",
+      slash: {
+        name: "find",
+        aliases: ["search"],
+      },
+      run: () => {
+        dialog.clear()
+        setFind({ open: true, index: 0 })
+        revealFindMatch()
       },
     },
     {
@@ -1170,6 +1229,11 @@ export function Session() {
           showDetails,
           showGenericToolOutput,
           diffWrapMode,
+          findQuery: () => (find.open ? find.query : ""),
+          findMark: (id) => {
+            if (findCurrent() === id) return "current"
+            if (findTargets().has(id)) return "match"
+          },
           providers,
           sync,
           tui: tuiConfig,
@@ -1310,18 +1374,32 @@ export function Session() {
                 <Show when={session()?.parentID}>
                   <SubagentFooter />
                 </Show>
+                <Show when={find.open}>
+                  <SessionFindBar
+                    query={find.query}
+                    index={findIndex()}
+                    count={findResults().length}
+                    onQuery={(query) => {
+                      setFind({ query, index: 0 })
+                      revealFindMatch()
+                    }}
+                    onNext={() => stepFind(1)}
+                    onPrevious={() => stepFind(-1)}
+                    onClose={() => setFind({ open: false, index: 0 })}
+                  />
+                </Show>
                 <Show when={visible()}>
                   <pluginRuntime.Slot
                     name="session_prompt"
                     mode="replace"
                     session_id={route.sessionID}
-                    visible={visible()}
+                    visible={visible() && !find.open}
                     disabled={disabled()}
                     on_submit={toBottom}
                     ref={bind}
                   >
                     <Prompt
-                      visible={visible()}
+                      visible={visible() && !find.open}
                       ref={bind}
                       disabled={disabled()}
                       onSubmit={() => {
@@ -1417,7 +1495,26 @@ function UserMessage(props: {
             backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
             flexShrink={0}
           >
-            <text fg={theme.text}>{text()}</text>
+            <Show when={ctx.findMark(props.message.id)} fallback={<text fg={theme.text}>{text()}</text>}>
+              {(mark) => (
+                <text fg={theme.text}>
+                  <For each={highlightSegments(text(), ctx.findQuery())}>
+                    {(segment) => (
+                      <Show when={segment.match} fallback={segment.text}>
+                        <span
+                          style={{
+                            bg: mark() === "current" ? theme.warning : findBackground(theme, "current"),
+                            fg: mark() === "current" ? selectedForeground(theme, theme.warning) : theme.text,
+                          }}
+                        >
+                          {segment.text}
+                        </span>
+                      </Show>
+                    )}
+                  </For>
+                </text>
+              )}
+            </Show>
             <Show when={files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                 <For each={files()}>
@@ -1543,13 +1640,14 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       </Show>
       <Show when={props.message.error && props.message.error.name !== "MessageAbortedError"}>
         <box
+          id={errorTarget(props.message.id)}
           ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
           border={["left"]}
           paddingTop={1}
           paddingBottom={1}
           paddingLeft={2}
           marginTop={1}
-          backgroundColor={theme.backgroundPanel}
+          backgroundColor={findBackground(theme, ctx.findMark(errorTarget(props.message.id)), theme.backgroundPanel)}
           customBorderChars={SplitBorder.customBorderChars}
           borderColor={theme.error}
         >
@@ -1627,27 +1725,31 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     if (!inMinimal() || opaque()) return
     setExpanded((prev) => !prev)
   }
+  // Collapsed reasoning opens while it holds the current find match so the hit is visible.
+  const findCurrent = createMemo(() => ctx.findMark(props.part.id) === "current")
 
   return (
     <Show when={content() || opaque()}>
       <box
+        id={props.part.id}
         ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
         paddingLeft={3}
         marginTop={1}
         flexDirection="column"
         flexShrink={0}
+        backgroundColor={findBackground(theme, ctx.findMark(props.part.id))}
       >
         <box onMouseUp={toggle}>
           <ReasoningHeader
             toggleable={inMinimal() && !opaque()}
-            open={!inMinimal() || expanded()}
+            open={!inMinimal() || expanded() || findCurrent()}
             done={isDone()}
             title={summary().title}
             duration={isDone() ? Locale.duration(duration()) : undefined}
             encrypted={opaque()}
           />
         </box>
-        <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
+        <Show when={!opaque() && (!inMinimal() || expanded() || findCurrent()) && summary().body}>
           <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
             <code
               filetype="markdown"
@@ -1705,7 +1807,14 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
   const { theme, syntax } = useTheme()
   return (
     <Show when={props.part.text.trim()}>
-      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
+      <box
+        id={props.part.id}
+        ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+        paddingLeft={3}
+        marginTop={1}
+        flexShrink={0}
+        backgroundColor={findBackground(theme, ctx.findMark(props.part.id))}
+      >
         <markdown
           syntaxStyle={syntax()}
           streaming={true}
@@ -1714,7 +1823,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
           tableOptions={{ style: "grid" }}
           conceal={ctx.conceal()}
           fg={theme.markdownText}
-          bg={theme.background}
+          bg={findBackground(theme, ctx.findMark(props.part.id), theme.background)}
         />
       </box>
     </Show>
@@ -1899,6 +2008,8 @@ function InlineTool(props: {
 
   return (
     <InlineToolRow
+      id={props.part.id}
+      backgroundColor={findBackground(theme, ctx.findMark(props.part.id))}
       icon={props.icon}
       iconColor={props.iconColor}
       color={fg()}
@@ -1946,9 +2057,13 @@ export function InlineToolRow(props: {
   onMouseOver?: () => void
   onMouseOut?: () => void
   onMouseUp?: () => void
+  id?: string
+  backgroundColor?: RGBA
 }) {
   return (
     <box
+      id={props.id}
+      backgroundColor={props.backgroundColor}
       paddingLeft={3}
       onMouseOver={props.onMouseOver}
       onMouseOut={props.onMouseOut}
@@ -2016,11 +2131,14 @@ function BlockTool(props: {
   spinner?: boolean
 }) {
   const { theme } = useTheme()
+  const ctx = use()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
+  const findMark = createMemo(() => (props.part ? ctx.findMark(props.part.id) : undefined))
   return (
     <box
+      id={props.part?.id}
       ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
       border={["left"]}
       paddingTop={1}
@@ -2028,7 +2146,7 @@ function BlockTool(props: {
       paddingLeft={2}
       marginTop={1}
       gap={1}
-      backgroundColor={hover() ? theme.backgroundMenu : theme.backgroundPanel}
+      backgroundColor={findBackground(theme, findMark(), hover() ? theme.backgroundMenu : theme.backgroundPanel)}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={theme.background}
       onMouseOver={() => props.onClick && setHover(true)}
