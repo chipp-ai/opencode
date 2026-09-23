@@ -50,6 +50,7 @@ import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
 import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
+import { DialogWorkflow } from "../dialog-workflow"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
@@ -512,6 +513,40 @@ export function Prompt(props: PromptProps) {
           })
           restoreExtmarksFromParts(updatedNonTextParts)
           input.cursorOffset = Bun.stringWidth(normalized)
+        },
+      },
+      {
+        title: "Workflows",
+        name: "prompt.workflows",
+        category: "Prompt",
+        slashName: "workflows",
+        run: () => {
+          dialog.replace(() => (
+            <DialogWorkflow
+              onSelect={(workflowID) => {
+                dialog.clear()
+                toast.show({ message: `Running workflow "${workflowID}"…`, variant: "info" })
+                // The generated client only builds a request body from fields actually present
+                // on this object, and omits the body entirely when none are -- explicit
+                // `args: undefined` forces a real (empty) JSON body, since the endpoint's
+                // payload schema requires an object even though every field in it is optional.
+                sdk.client.v2.workflow.run({ id: workflowID, args: undefined }).then((res) => {
+                  if (res.error) {
+                    toast.error(res.error)
+                    return
+                  }
+                  const run = res.data.data
+                  toast.show({
+                    message:
+                      run.status === "completed"
+                        ? `Workflow "${workflowID}" completed`
+                        : `Workflow "${workflowID}" ${run.status}: ${run.error ?? ""}`,
+                    variant: run.status === "completed" ? "success" : "error",
+                  })
+                })
+              }}
+            />
+          ))
         },
       },
       {

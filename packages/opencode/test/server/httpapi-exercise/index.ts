@@ -744,7 +744,7 @@ const scenarios: Scenario[] = [
       path: route("/api/workflow/run/{runID}", { runID: "run_missing" }),
       headers: ctx.headers(),
     }))
-    .status(500, undefined, "status"),
+    .status(404, undefined, "status"),
   http.protected
     .get("/api/event", "v2.event.subscribe")
     .stream()
