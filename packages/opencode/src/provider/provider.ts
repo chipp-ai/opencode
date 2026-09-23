@@ -19,6 +19,9 @@ import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema, Types } from "effect"
+import { HttpClient } from "effect/unstable/http"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
+import { ProviderDiscovery } from "@opencode-ai/core/provider-discovery"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectPromise } from "@/effect/promise"
@@ -1262,6 +1265,44 @@ function cloudflareGatewayNpm(providerID: string, modelID: string) {
   return undefined
 }
 
+// Discovery only reports ids (and sometimes limits), so capabilities stay conservative: text in/out with tools.
+// Unknown limits stay 0, which the session code already treats as "unknown" rather than guessing a window.
+function discoveredModel(
+  providerID: ProviderV2.ID,
+  model: ProviderDiscovery.Model,
+  npm: string | undefined,
+  url: string,
+): Model {
+  const apiNpm = npm ?? "@ai-sdk/openai-compatible"
+  return {
+    id: ModelV2.ID.make(model.id),
+    providerID,
+    name: model.id,
+    family: "",
+    api: { id: model.id, url, npm: apiNpm },
+    status: "active",
+    headers: {},
+    options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context: model.context ?? 0, output: model.output ?? 0 },
+    capabilities: {
+      temperature: true,
+      reasoning: false,
+      attachment: false,
+      toolcall: true,
+      input: { text: true, audio: false, image: false, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      // Same deepseek default the config-model path applies to openai-compatible models.
+      interleaved:
+        apiNpm === "@ai-sdk/openai-compatible" && model.id.includes("deepseek")
+          ? { field: "reasoning_content" }
+          : false,
+    },
+    release_date: "",
+    // Left unset so the provider filter pass derives variants through ProviderTransform like other models.
+  }
+}
+
 function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
   const base: Model = {
     id: ModelV2.ID.make(model.id),
@@ -1396,6 +1437,7 @@ const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const modelsDevSvc = yield* ModelsDev.Service
     const runtimeFlags = yield* RuntimeFlags.Service
+    const http = yield* HttpClient.HttpClient
 
     const state = yield* InstanceState.make<State>(() =>
       Effect.gen(function* () {
@@ -1667,6 +1709,48 @@ const layer = Layer.effect(
             } catch (e) {}
           })
         }
+
+        // Opt-in /models discovery runs before the filter pass below so whitelist/blacklist apply to discovered
+        // models, and a provider whose discovery fails with no static models is dropped instead of breaking load.
+        yield* Effect.forEach(
+          configProviders.filter(
+            ([id, item]) =>
+              item.discoverModels === true &&
+              providers[ProviderV2.ID.make(id)] &&
+              isProviderAllowed(ProviderV2.ID.make(id)),
+          ),
+          Effect.fnUntraced(function* ([id, item]) {
+            const provider = providers[ProviderV2.ID.make(id)]
+            const baseURL = typeof provider.options.baseURL === "string" ? provider.options.baseURL : item.api
+            if (!baseURL) return
+            const apiKey = provider.key ?? provider.options.apiKey
+            const discovered = yield* ProviderDiscovery.models(http, {
+              baseURL,
+              apiKey: typeof apiKey === "string" ? apiKey : undefined,
+              headers: isRecord(provider.options.headers)
+                ? pickBy(provider.options.headers, (value): value is string => typeof value === "string")
+                : undefined,
+            }).pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("provider model discovery failed", {
+                  providerID: id,
+                  url: error.url,
+                  message: error.message,
+                }).pipe(Effect.as([])),
+              ),
+            )
+            for (const model of discovered) {
+              const existing = provider.models[model.id]
+              if (!existing) {
+                provider.models[model.id] = discoveredModel(provider.id, model, item.npm, baseURL)
+                continue
+              }
+              if (existing.limit.context === 0 && model.context) existing.limit.context = model.context
+              if (existing.limit.output === 0 && model.output) existing.limit.output = model.output
+            }
+          }),
+          { concurrency: "unbounded", discard: true },
+        )
 
         for (const [id, provider] of Object.entries(providers)) {
           const providerID = ProviderV2.ID.make(id)
@@ -2066,7 +2150,7 @@ export function parseModel(model: string) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, Config.node, Auth.node, Env.node, Plugin.node, ModelsDev.node, RuntimeFlags.node],
+  deps: [FSUtil.node, Config.node, Auth.node, Env.node, Plugin.node, ModelsDev.node, RuntimeFlags.node, httpClient],
 })
 
 export * as Provider from "./provider"

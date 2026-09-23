@@ -115,6 +115,29 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("migrates v1 discoverModels into provider discovery", () =>
+    Effect.sync(() => {
+      const migrated = ConfigMigrateV1.migrate({
+        provider: {
+          local: {
+            npm: "@ai-sdk/openai-compatible",
+            discoverModels: true,
+            options: { baseURL: "http://localhost:1234/v1", apiKey: "local-key" },
+          },
+        },
+      })
+
+      expect(migrated.providers?.local?.discover).toBe(true)
+      expect(migrated.providers?.local?.api).toEqual({
+        type: "aisdk",
+        package: "@ai-sdk/openai-compatible",
+        url: "http://localhost:1234/v1",
+        settings: { apiKey: "local-key" },
+      })
+      expect(Schema.decodeUnknownSync(Config.Info)(migrated).providers?.local?.discover).toBe(true)
+    }),
+  )
+
   it.effect("migrates v1 command configuration", () =>
     Effect.sync(() => {
       expect(

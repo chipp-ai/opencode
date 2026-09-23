@@ -128,5 +128,9 @@ export const Info = Schema.Struct({
     ),
   ),
   models: Schema.optional(Schema.Record(Schema.String, Model)),
+  discoverModels: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Discover models from the provider's OpenAI-compatible GET {baseURL}/models endpoint and add them alongside configured models (default false)",
+  }),
 }).annotate({ identifier: "ProviderConfig" })
 export type Info = Schema.Schema.Type<typeof Info>

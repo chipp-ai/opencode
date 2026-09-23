@@ -184,6 +184,7 @@ function migrateProvider(info: ConfigProviderV1.Info) {
         }
       : undefined,
     request: info.options && { headers: options.headers, body: options.body },
+    discover: info.discoverModels,
     models:
       info.models &&
       Object.fromEntries(Object.entries(info.models).map(([name, model]) => [name, migrateModel(model, info.npm)])),

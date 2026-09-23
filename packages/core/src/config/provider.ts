@@ -68,4 +68,8 @@ export class Info extends Schema.Class<Info>("ConfigV2.Provider")({
   api: ProviderV2.Api.pipe(Schema.optional),
   request: Request.pipe(Schema.optional),
   models: Schema.Record(Schema.String, Model).pipe(Schema.optional),
+  discover: Schema.Boolean.pipe(Schema.optional).annotate({
+    description:
+      "Discover models from the provider's OpenAI-compatible GET {api.url}/models endpoint and add them alongside configured models",
+  }),
 }) {}

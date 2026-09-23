@@ -1848,6 +1848,7 @@ export type ProviderConfig = {
       }
     }
   }
+  discoverModels?: boolean
 }
 
 export type McpLocalConfig = {

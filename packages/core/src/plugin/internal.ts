@@ -12,6 +12,7 @@ import { ConfigAgentPlugin } from "../config/plugin/agent"
 import { ConfigCommandPlugin } from "../config/plugin/command"
 import { ConfigExternalPlugin } from "../config/plugin/external"
 import { ConfigProviderPlugin } from "../config/plugin/provider"
+import { ConfigProviderDiscoveryPlugin } from "../config/plugin/provider-discovery"
 import { ConfigReferencePlugin } from "../config/plugin/reference"
 import { ConfigSkillPlugin } from "../config/plugin/skill"
 import { EventV2 } from "../event"
@@ -118,6 +119,7 @@ const layer = Layer.effectDiscard(
         for (const item of ProviderPlugins) yield* add(item)
         yield* add(ConfigExternalPlugin.Plugin)
         yield* add(ConfigProviderPlugin.Plugin)
+        yield* add(ConfigProviderDiscoveryPlugin.Plugin)
         yield* add(VariantPlugin.Plugin)
       }),
     ).pipe(Effect.withSpan("PluginInternal.boot"), Effect.forkScoped({ startImmediately: true }))
