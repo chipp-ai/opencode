@@ -3,8 +3,10 @@ import {
   RGBA,
   TextareaRenderable,
   MouseEvent,
+  MouseButton,
   PasteEvent,
   decodePasteBytes,
+  type Extmark,
   type KeyEvent,
   type Renderable,
 } from "@opentui/core"
@@ -32,7 +34,12 @@ import { promptOffsetWidth } from "../../prompt/display"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { usePromptHistory, type PromptInfo } from "../../prompt/history"
 import { computePromptTraits } from "../../prompt/traits"
-import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
+import {
+  expandPastedTextPlaceholders,
+  expandTrackedPastedText,
+  replaceVirtualExtmarkText,
+  togglePastedText,
+} from "../../prompt/part"
 import { usePromptStash } from "../../prompt/stash"
 import { DialogStash } from "../dialog-stash"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
@@ -234,6 +241,8 @@ export function Prompt(props: PromptProps) {
   const agentStyleId = syntax().getStyleId("extmark.agent")!
   const pasteStyleId = syntax().getStyleId("extmark.paste")!
   let promptPartTypeId = 0
+  let suppressSync = false
+  let mouseDown: { x: number; y: number } | undefined
   const event = useEvent()
 
   event.on("tui.prompt.append", (evt, { workspace }) => {
@@ -393,6 +402,23 @@ export function Prompt(props: PromptProps) {
         },
       },
       {
+        title: "Expand/collapse pasted text",
+        name: "prompt.paste.toggle",
+        category: "Prompt",
+        enabled: store.prompt.parts.some((part) => part.type === "text" && part.source?.text),
+        run: () => {
+          const marks = input.extmarks
+            .getAllForTypeId(promptPartTypeId)
+            .filter((mark) => pastedPartIndex(mark) !== undefined)
+          // Prefer the chip the cursor is on or next to; otherwise the last one in the prompt.
+          const mark =
+            marks.find((item) => item.start <= input.cursorOffset && input.cursorOffset <= item.end) ??
+            marks.toSorted((a, b) => b.start - a.start)[0]
+          if (mark) togglePastedPart(mark)
+          dialog.clear()
+        },
+      },
+      {
         title: "Interrupt session",
         name: "session.interrupt",
         category: "Session",
@@ -432,12 +458,7 @@ export function Prompt(props: PromptProps) {
           dialog.clear()
 
           // replace summarized text parts with the actual text
-          const text = store.prompt.parts
-            .filter((p) => p.type === "text")
-            .reduce((acc, p) => {
-              if (!p.source) return acc
-              return acc.replace(p.source.text.value, p.text)
-            }, store.prompt.input)
+          const text = expandPastedTextPlaceholders(store.prompt.input, store.prompt.parts)
 
           const nonTextParts = store.prompt.parts.filter((p) => p.type !== "text")
 
@@ -609,6 +630,7 @@ export function Prompt(props: PromptProps) {
       "prompt.stash",
       "prompt.stash.pop",
       "prompt.stash.list",
+      "prompt.paste.toggle",
       "prompt.skills",
       "session.interrupt",
       "workspace.set",
@@ -768,6 +790,45 @@ export function Prompt(props: PromptProps) {
         draft.prompt.parts = newParts
       }),
     )
+  }
+
+  function pastedPartIndex(mark: Extmark) {
+    const partIndex = store.extmarkToPartIndex.get(mark.id)
+    if (partIndex === undefined) return
+    const part = store.prompt.parts[partIndex]
+    if (part?.type !== "text" || !part.source?.text) return
+    return partIndex
+  }
+
+  function togglePastedPart(mark: Extmark) {
+    const partIndex = pastedPartIndex(mark)
+    const part = partIndex === undefined ? undefined : store.prompt.parts[partIndex]
+    if (partIndex === undefined || part?.type !== "text" || !part.source) return
+    const next = togglePastedText({ text: part.text, source: part.source })
+    if (!next) return
+
+    // insertText fires onContentChange synchronously while the part's extmark is deleted;
+    // syncing then would drop the part.
+    suppressSync = true
+    const created = replaceVirtualExtmarkText(input, mark, next.value)
+    suppressSync = false
+
+    setStore(
+      produce((draft) => {
+        draft.extmarkToPartIndex.delete(mark.id)
+        draft.extmarkToPartIndex.set(created.id, partIndex)
+        const draftPart = draft.prompt.parts[partIndex]
+        if (draftPart?.type !== "text" || !draftPart.source) return
+        draftPart.source.text = {
+          start: created.start,
+          end: created.end,
+          value: next.value,
+          placeholder: next.placeholder,
+        }
+      }),
+    )
+    // The width change shifts the ranges of later chips.
+    syncExtmarksWithPromptParts()
   }
 
   const stashCommands = createMemo(() =>
@@ -1209,6 +1270,7 @@ export function Prompt(props: PromptProps) {
               start: extmarkStart,
               end: extmarkEnd,
               value: virtualText,
+              placeholder: virtualText,
             },
           },
         })
@@ -1415,7 +1477,7 @@ export function Prompt(props: PromptProps) {
                 const value = input.plainText
                 setStore("prompt", "input", value)
                 auto()?.onInput(value)
-                syncExtmarksWithPromptParts()
+                if (!suppressSync) syncExtmarksWithPromptParts()
                 setCursorVersion((value) => value + 1)
               }}
               onCursorChange={() => setCursorVersion((value) => value + 1)}
@@ -1472,7 +1534,21 @@ export function Prompt(props: PromptProps) {
                   if (tuiConfig.cursor) input.cursorStyle = tuiConfig.cursor
                 }, 0)
               }}
-              onMouseDown={(r: MouseEvent) => r.target?.focus()}
+              onMouseDown={(r: MouseEvent) => {
+                r.target?.focus()
+                mouseDown = { x: r.x, y: r.y }
+              }}
+              onMouseUp={(r: MouseEvent) => {
+                const start = mouseDown
+                mouseDown = undefined
+                if (props.disabled || r.button !== MouseButton.LEFT || !start) return
+                // A drag selects text; only a click toggles.
+                if (Math.abs(r.x - start.x) >= 2 || Math.abs(r.y - start.y) >= 2) return
+                const mark = input.extmarks
+                  .getAtOffset(input.cursorOffset)
+                  .find((item) => item.typeId === promptPartTypeId && pastedPartIndex(item) !== undefined)
+                if (mark) togglePastedPart(mark)
+              }}
               focusedBackgroundColor={theme.backgroundElement}
               cursorColor={props.disabled ? theme.backgroundElement : theme.text}
               cursorStyle={tuiConfig.cursor}
