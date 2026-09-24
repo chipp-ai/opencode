@@ -60,6 +60,8 @@ export const User = Schema.Struct({
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,
   format: Prompt.fields.format,
+  agentOverride: Prompt.fields.agentOverride,
+  modelOverride: Prompt.fields.modelOverride,
   type: Schema.Literal("user"),
 }).annotate({ identifier: "Session.Message.User" })
 

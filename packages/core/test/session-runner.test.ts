@@ -41,6 +41,7 @@ import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
 import { AgentV2 } from "@opencode-ai/core/agent"
+import { CommandV2 } from "@opencode-ai/core/command"
 import { Config } from "@opencode-ai/core/config"
 import { ConfigCompaction } from "@opencode-ai/core/config/compaction"
 import { Tool } from "@opencode-ai/core/tool/tool"
@@ -167,7 +168,11 @@ const echoNode = makeLocationNode({ name: "test/session-runner-tools", layer: ec
 let modelResolveHook = Effect.void
 let currentModel = model
 const models = SessionRunnerModel.layerWith((session) =>
-  modelResolveHook.pipe(Effect.as(resolved(session.model?.id === "replacement" ? replacementModel : currentModel))),
+  session.model?.id === "missing"
+    ? Effect.fail(
+        new SessionRunnerModel.ModelUnavailableError({ providerID: session.model.providerID, modelID: session.model.id }),
+      )
+    : modelResolveHook.pipe(Effect.as(resolved(session.model?.id === "replacement" ? replacementModel : currentModel))),
 )
 const systemContextKey = SystemContext.Key.make("test/context")
 let systemBaseline = "Initial context"
@@ -237,13 +242,17 @@ const config = Layer.succeed(
       ]),
   }),
 )
-// Manual compaction resolves its Location-scoped model and config through LocationServiceMap; serve only those.
+// Manual compaction and command dispatch resolve Location-scoped services through LocationServiceMap. Serve the
+// harness's own agent, command, and tool instances so a dispatched subagent is visible to the runner.
 const locationServiceMap = Layer.effect(
   LocationServiceMap.Service,
-  LayerMap.make(() => Layer.merge(models, config)) as unknown as Effect.Effect<
+  Effect.gen(function* () {
+    const shared = yield* Effect.context<AgentV2.Service | CommandV2.Service | ToolRegistry.Service>()
+    return yield* LayerMap.make(() => Layer.mergeAll(models, config, Layer.succeedContext(shared)))
+  }) as unknown as Effect.Effect<
     LayerMap.LayerMap<Location.Ref, LocationServices, LocationError>,
     never,
-    Scope.Scope
+    Scope.Scope | AgentV2.Service | CommandV2.Service | ToolRegistry.Service
   >,
 )
 const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
@@ -283,6 +292,7 @@ const it = testEffect(
       SessionStore.node,
       ApplicationTools.node,
       AgentV2.node,
+      CommandV2.node,
       ToolRegistry.node,
       ToolRegistry.toolsNode,
       echoNode,
@@ -3751,6 +3761,185 @@ describe("SessionRunnerLLM", () => {
           { type: "assistant", finish: "stop" },
         ])
         expect(context[1]).not.toHaveProperty("structured")
+      }),
+    )
+  })
+
+  describe("slash commands", () => {
+    const commandModel = { id: ModelV2.ID.make("replacement"), providerID: ProviderV2.ID.make("fake") }
+    const register = (commands: ReadonlyArray<CommandV2.Info>) =>
+      Effect.gen(function* () {
+        const registry = yield* CommandV2.Service
+        yield* registry.transform((editor) => {
+          for (const item of commands)
+            editor.update(item.name, (draft) => {
+              Object.assign(draft, item)
+            })
+        })
+      })
+    const text = (id: string, value: string) => fragmentFixture("text", id, [value]).completeEvents
+    const agentSystem = (request: LLMRequest | undefined) => request?.system.map((part) => part.text).join("\n") ?? ""
+
+    it.effect("substitutes positional placeholders and $ARGUMENTS", () =>
+      Effect.gen(function* () {
+        yield* setup
+        yield* register([
+          { name: "review", template: "Review $1 against $2 ($ARGUMENTS)" },
+          { name: "plain", template: "Plain template" },
+        ])
+        const session = yield* SessionV2.Service
+        requests.length = 0
+        responses = [text("text-review", "Reviewed"), text("text-plain", "Done")]
+
+        yield* session.command({ sessionID, command: "review", arguments: 'src/a.ts "the main branch" extra' })
+        yield* session.wait(sessionID)
+        yield* session.command({ sessionID, command: "plain", arguments: "trailing words" })
+        yield* session.wait(sessionID)
+
+        expect(userTexts(requests[0]!).at(-1)).toBe(
+          'Review src/a.ts against the main branch extra (src/a.ts "the main branch" extra)',
+        )
+        expect(userTexts(requests[1]!).at(-1)).toBe("Plain template\n\ntrailing words")
+      }),
+    )
+
+    it.live("expands inline shell markers after argument substitution", () =>
+      Effect.gen(function* () {
+        yield* setup
+        yield* register([{ name: "status", template: "Branch: !`echo branch-$1` Dir: !`pwd`" }])
+        const session = yield* SessionV2.Service
+        requests.length = 0
+        response = text("text-status", "Noted")
+
+        yield* session.command({ sessionID, command: "status", arguments: "main" })
+        yield* session.wait(sessionID)
+
+        expect(userTexts(requests[0]!).at(-1)).toBe(`Branch: branch-main\n Dir: ${projectDirectory}`)
+      }),
+    )
+
+    it.effect("serves one prompt with the command's agent and model without switching the Session", () =>
+      Effect.gen(function* () {
+        yield* setup
+        const agents = yield* AgentV2.Service
+        yield* agents.transform((editor) => {
+          editor.update(AgentV2.ID.make("build"), (agent) => {
+            agent.mode = "primary"
+            agent.system = "You are build."
+          })
+          editor.update(AgentV2.ID.make("planner"), (agent) => {
+            agent.mode = "primary"
+            agent.system = "You are planner."
+          })
+        })
+        yield* register([{ name: "plan", template: "Plan $ARGUMENTS", agent: "planner", model: commandModel }])
+        const session = yield* SessionV2.Service
+        const before = yield* session.get(sessionID)
+        requests.length = 0
+        responses = [text("text-plan", "Planned"), text("text-after", "Built")]
+
+        const dispatched = yield* session.command({ sessionID, command: "plan", arguments: "the feature" })
+        yield* session.wait(sessionID)
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Now build it" }) })
+        yield* session.wait(sessionID)
+
+        expect(dispatched).toMatchObject({
+          type: "prompt",
+          input: { prompt: { text: "Plan the feature", agentOverride: "planner", modelOverride: commandModel } },
+        })
+        expect(requests).toHaveLength(2)
+        expect(String(requests[0]?.model.id)).toBe("replacement")
+        expect(agentSystem(requests[0])).toContain("You are planner.")
+        expect(String(requests[1]?.model.id)).toBe("fake-model")
+        expect(agentSystem(requests[1])).toContain("You are build.")
+        expect(agentSystem(requests[1])).not.toContain("You are planner.")
+        const after = yield* session.get(sessionID)
+        expect(after.agent).toBe(before.agent)
+        expect(after.model).toEqual(before.model)
+        const context = yield* session.context(sessionID)
+        expect(context.map((message) => message.type)).not.toContain("agent-switched")
+        expect(context.map((message) => message.type)).not.toContain("model-switched")
+        expect(context).toMatchObject([
+          { type: "user", text: "Plan the feature", agentOverride: "planner", modelOverride: commandModel },
+          { type: "assistant", agent: "planner", model: { id: "replacement" } },
+          { type: "user", text: "Now build it" },
+          { type: "assistant", agent: "build", model: { id: "fake-model" } },
+        ])
+        expect(context[2]).not.toHaveProperty("agentOverride")
+        expect(context[2]).not.toHaveProperty("modelOverride")
+      }),
+    )
+
+    it.effect("runs a subagent command through WorkflowAgentDispatch and records its answer", () =>
+      Effect.gen(function* () {
+        yield* setup
+        const agents = yield* AgentV2.Service
+        yield* agents.transform((editor) =>
+          editor.update(AgentV2.ID.make("explorer"), (agent) => {
+            agent.mode = "subagent"
+            agent.system = "You are a focused explorer subagent."
+          }),
+        )
+        yield* register([{ name: "explore", template: "Explore $1", agent: "explorer" }])
+        const session = yield* SessionV2.Service
+        requests.length = 0
+        responses = [text("text-child", "Found three callers"), text("text-parent", "Summary")]
+
+        const dispatched = yield* session.command({ sessionID, command: "explore", arguments: "SessionV2" })
+        yield* session.wait(sessionID)
+
+        if (dispatched.type !== "subtask") throw new Error("expected a subtask dispatch")
+        expect(dispatched.text).toBe("Found three callers")
+        expect(dispatched.sessionID).not.toBe(sessionID)
+        expect((yield* session.get(dispatched.sessionID)).parentID).toBe(sessionID)
+        expect(requests).toHaveLength(2)
+        expect(requests[0]?.http?.headers?.["x-parent-session-id"]).toBe(sessionID)
+        expect(userTexts(requests[0]!)).toEqual(["Explore SessionV2"])
+        expect(agentSystem(requests[0])).toContain("You are a focused explorer subagent.")
+        // The parent never admits the command text as its own prompt; it answers the recorded subagent result.
+        const context = yield* session.context(sessionID)
+        expect(context.map((message) => message.type)).toEqual(["synthetic", "assistant"])
+        expect(context[0]).toMatchObject({ type: "synthetic", text: expect.stringContaining("Found three callers") })
+        expect(userTexts(requests[1]!).join("\n")).toContain("Found three callers")
+      }),
+    )
+
+    it.effect("rejects an unknown command with a suggestion", () =>
+      Effect.gen(function* () {
+        yield* setup
+        yield* register([{ name: "review", template: "Review" }])
+        const session = yield* SessionV2.Service
+
+        const error = yield* session.command({ sessionID, command: "reviw" }).pipe(Effect.flip)
+
+        expect(error).toBeInstanceOf(SessionV2.CommandNotFoundError)
+        expect(error.message).toBe('Command not found: "reviw". Did you mean: review?')
+        expect(yield* session.pending(sessionID)).toEqual([])
+      }),
+    )
+
+    it.effect("rejects an unknown agent or model before admitting anything", () =>
+      Effect.gen(function* () {
+        yield* setup
+        yield* register([
+          { name: "ghost", template: "Boo", agent: "nobody" },
+          {
+            name: "broken",
+            template: "Boo",
+            model: { id: ModelV2.ID.make("missing"), providerID: ProviderV2.ID.make("fake") },
+          },
+        ])
+        const session = yield* SessionV2.Service
+
+        const agentError = yield* session.command({ sessionID, command: "ghost" }).pipe(Effect.flip)
+        const modelError = yield* session.command({ sessionID, command: "broken" }).pipe(Effect.flip)
+
+        expect(agentError).toBeInstanceOf(SessionV2.AgentNotFoundError)
+        expect(agentError.message).toStartWith('Agent not found: "nobody".')
+        expect(modelError).toBeInstanceOf(SessionRunnerModel.ModelUnavailableError)
+        expect(modelError.message).toBe("Model unavailable: fake/missing")
+        expect(yield* session.pending(sessionID)).toEqual([])
+        expect(yield* session.context(sessionID)).toEqual([])
       }),
     )
   })

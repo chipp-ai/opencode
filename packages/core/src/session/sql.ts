@@ -145,7 +145,7 @@ export const SessionInputTable = sqliteTable(
       .$type<SessionSchema.ID>()
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
-    prompt: text({ mode: "json" }).notNull().$type<Prompt>(),
+    prompt: text({ mode: "json" }).notNull().$type<typeof Prompt.Encoded>(),
     delivery: text().$type<SessionInput.Delivery>().notNull(),
     admitted_seq: integer().notNull(),
     promoted_seq: integer(),

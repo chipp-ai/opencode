@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { optional } from "./schema"
 import { statics } from "./schema"
+import { Model } from "./model"
 
 export interface Source extends Schema.Schema.Type<typeof Source> {}
 export const Source = Schema.Struct({
@@ -50,17 +51,25 @@ export const Prompt = Schema.Struct({
   files: Schema.Array(FileAttachment).pipe(optional),
   agents: Schema.Array(AgentAttachment).pipe(optional),
   format: Format.pipe(optional),
+  /** Serves only this prompt's turns with this agent; the Session's own agent is unchanged. */
+  agentOverride: Schema.String.pipe(optional),
+  /** Serves only this prompt's turns with this model; the Session's own model is unchanged. */
+  modelOverride: Model.Ref.pipe(optional),
 })
   .annotate({ identifier: "Prompt" })
   .pipe(
     statics((schema) => ({
       equivalence: Schema.toEquivalence(schema),
-      fromUserMessage: (input: Pick<Prompt, "text" | "files" | "agents" | "format">) =>
+      fromUserMessage: (
+        input: Pick<Prompt, "text" | "files" | "agents" | "format" | "agentOverride" | "modelOverride">,
+      ) =>
         schema.make({
           text: input.text,
           ...(input.files === undefined ? {} : { files: input.files }),
           ...(input.agents === undefined ? {} : { agents: input.agents }),
           ...(input.format === undefined ? {} : { format: input.format }),
+          ...(input.agentOverride === undefined ? {} : { agentOverride: input.agentOverride }),
+          ...(input.modelOverride === undefined ? {} : { modelOverride: input.modelOverride }),
         }),
     })),
   )

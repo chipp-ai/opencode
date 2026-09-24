@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { CommandV2 } from "@opencode-ai/core/command"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -53,4 +53,23 @@ describe("CommandV2", () => {
       ])
     }),
   )
+})
+
+describe("CommandV2.render", () => {
+  test("fills positional placeholders, letting the highest one swallow the rest", () => {
+    expect(CommandV2.render("Compare $1 with $2", 'a.ts "b c.ts" d.ts')).toBe("Compare a.ts with b c.ts d.ts")
+  })
+
+  test("blanks placeholders with no matching argument", () => {
+    expect(CommandV2.render("A=$1 B=$2", "only")).toBe("A=only B=")
+  })
+
+  test("substitutes $ARGUMENTS verbatim, including replacement-pattern characters", () => {
+    expect(CommandV2.render("Run: $ARGUMENTS", "echo $& $1")).toBe("Run: echo $& $1")
+  })
+
+  test("appends raw arguments to a template without placeholders", () => {
+    expect(CommandV2.render("Summarize", "the diff")).toBe("Summarize\n\nthe diff")
+    expect(CommandV2.render("Summarize", "  ")).toBe("Summarize")
+  })
 })

@@ -780,6 +780,74 @@ describe("session HttpApi", () => {
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 
+  it.live("runs a slash command in a v2 session with a one-shot model", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      const directory = yield* tmpdirScoped({ git: true })
+      const models = { limit: { context: 100_000, output: 10_000 } }
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(directory, "opencode.json"),
+          JSON.stringify({
+            providers: {
+              test: {
+                api: { type: "aisdk", package: "@ai-sdk/openai-compatible", url: llm.url, settings: {} },
+                request: { body: { apiKey: "test-key" } },
+                models: { "test-model": models, "command-model": models },
+              },
+            },
+            commands: { inspect: { template: "Inspect $1 then !`echo shell-$2`", model: "test/command-model" } },
+          }),
+        ),
+      )
+      const headers = { "x-opencode-directory": directory }
+      const json = { ...headers, "content-type": "application/json" }
+      const created = yield* requestJson<{ data: { id: string } }>("/api/session", {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ model: { providerID: "test", id: "test-model" }, location: { directory } }),
+      })
+      const session = created.data
+      yield* pollWithTimeout(
+        requestJson<{ data: { name: string }[] }>("/api/command", { headers }).pipe(
+          Effect.map(({ data }) => data.find((command) => command.name === "inspect")),
+        ),
+        "configured inspect command never reached the V2 registry",
+      )
+
+      const missing = yield* request(`/api/session/${session.id}/command`, {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ command: "inspct" }),
+      })
+      const missingBody = yield* missing.text
+      expect({ status: missing.status, body: missingBody }).toMatchObject({ status: 400 })
+      expect(missingBody).toContain("Did you mean: inspect?")
+
+      yield* llm.text("reviewed", { usage: { input: 1, output: 1 } })
+      const dispatched = yield* requestJson<{ data: { type: string } }>(`/api/session/${session.id}/command`, {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ command: "inspect", arguments: "src/a.ts ok" }),
+      })
+      expect(dispatched.data.type).toBe("prompt")
+      yield* request(`/api/session/${session.id}/wait`, { method: "POST", headers })
+      yield* llm.text("followed up", { usage: { input: 1, output: 1 } })
+      yield* request(`/api/session/${session.id}/prompt`, {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ prompt: { text: "plain follow-up" } }),
+      })
+      yield* request(`/api/session/${session.id}/wait`, { method: "POST", headers })
+
+      const hits = (yield* llm.hits).filter((hit) => !JSON.stringify(hit.body).includes("Generate a title"))
+      expect(hits.map((hit) => hit.body.model)).toEqual(["command-model", "test-model"])
+      expect(JSON.stringify(hits[0].body)).toContain("Inspect src/a.ts then shell-ok")
+      const info = yield* requestJson<{ data: { model?: { id: string } } }>(`/api/session/${session.id}`, { headers })
+      expect(info.data.model?.id).toBe("test-model")
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
+
   // session.wait is implemented for real (SessionRunCoordinator.join) -- an idle session (no
   // active drain) resolves immediately with no content, rather than the old hardcoded 503 stub.
   it.instance(

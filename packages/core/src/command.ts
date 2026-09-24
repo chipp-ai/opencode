@@ -59,6 +59,34 @@ const layer = Layer.effect(
   }),
 )
 
+/** Inline `` !`command` `` markers, expanded with shell output after argument substitution. */
+export const SHELL_PATTERN = /!`([^`]+)`/g
+
+const ARGUMENT_PATTERN = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
+const PLACEHOLDER_PATTERN = /\$(\d+)/g
+const QUOTE_PATTERN = /^["']|["']$/g
+
+/**
+ * Substitutes `$1`, `$2`, ... and `$ARGUMENTS` into a command template, matching V1. The highest positional
+ * placeholder swallows every remaining argument. A template without placeholders gets the raw arguments appended.
+ */
+export function render(template: string, args: string) {
+  const parsed = (args.match(ARGUMENT_PATTERN) ?? []).map((arg) => arg.replace(QUOTE_PATTERN, ""))
+  const placeholders = template.match(PLACEHOLDER_PATTERN) ?? []
+  const last = Math.max(0, ...placeholders.map((item) => Number(item.slice(1))))
+  const text = template
+    .replaceAll(PLACEHOLDER_PATTERN, (_, index) => {
+      const position = Number(index)
+      if (position > parsed.length) return ""
+      if (position === last) return parsed.slice(position - 1).join(" ")
+      return parsed[position - 1]
+    })
+    // A replacer function, so `$&`-style sequences typed in the arguments stay literal.
+    .replaceAll("$ARGUMENTS", () => args)
+  if (placeholders.length === 0 && !template.includes("$ARGUMENTS") && args.trim()) return text + "\n\n" + args
+  return text
+}
+
 export const locationLayer = layer
 
 export const node = makeLocationNode({ service: Service, layer, deps: [] })

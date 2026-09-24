@@ -29,6 +29,8 @@ import type {
   SessionsCompactOutput,
   SessionsShellInput,
   SessionsShellOutput,
+  SessionsCommandInput,
+  SessionsCommandOutput,
   SessionsWaitInput,
   SessionsWaitOutput,
   SessionsStageInput,
@@ -463,6 +465,26 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ),
+      command: (input: SessionsCommandInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SessionsCommandOutput }>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/command`,
+            body: {
+              id: input["id"],
+              command: input["command"],
+              arguments: input["arguments"],
+              agent: input["agent"],
+              model: input["model"],
+              files: input["files"],
+              delivery: input["delivery"],
+            },
+            successStatus: 200,
+            declaredStatuses: [409, 400, 404, 500, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
       wait: (input: SessionsWaitInput, requestOptions?: RequestOptions) =>
         request<SessionsWaitOutput>(
           {

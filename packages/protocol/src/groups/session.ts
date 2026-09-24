@@ -85,6 +85,16 @@ const SessionActive = Schema.Struct({
   type: Schema.Literal("running"),
 }).annotate({ identifier: "SessionActive" })
 
+export const SessionCommandResult = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("prompt"), input: SessionInput.Admitted }),
+  Schema.Struct({
+    type: Schema.Literal("subtask"),
+    sessionID: Session.ID,
+    text: Schema.String,
+    error: Schema.String.pipe(Schema.optional),
+  }),
+]).annotate({ identifier: "SessionCommandResult" })
+
 const SessionHistoryLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(100))
 
 export const SessionHistoryQuery = Schema.Struct({
@@ -320,6 +330,35 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
             summary: "Run shell command",
             description:
               "Run a user-typed shell command in the session directory and record its output without calling the model. Set resume to true to let the agent respond to the output.",
+          }),
+        ),
+    )
+    .add(
+      HttpApiEndpoint.post("session.command", "/api/session/:sessionID/command", {
+        params: { sessionID: Session.ID },
+        payload: Schema.Struct({
+          id: SessionMessage.ID.pipe(Schema.optional),
+          command: Schema.String,
+          arguments: Schema.String.pipe(Schema.optional),
+          agent: Agent.ID.pipe(Schema.optional).annotate({
+            description: "The caller's current agent, used when the command names none.",
+          }),
+          model: Model.Ref.pipe(Schema.optional).annotate({
+            description: "The caller's current model, used when neither the command nor its agent names one.",
+          }),
+          files: PromptInput.Prompt.fields.files,
+          delivery: SessionInput.Delivery.pipe(Schema.optional),
+        }),
+        success: Schema.Struct({ data: SessionCommandResult }),
+        error: [ConflictError, InvalidRequestError, SessionNotFoundError, UnknownError],
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "v2.session.command",
+            summary: "Run slash command",
+            description:
+              "Expand a registered command's template and either prompt the session with the command's agent and model applied to that prompt only, or run it in a subagent and record the result. The session's own agent and model are unchanged.",
           }),
         ),
     )

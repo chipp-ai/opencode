@@ -49,6 +49,8 @@ import { llmClient } from "./effect/app-node-platform"
 import { AppProcess } from "./process"
 import { Shell } from "./shell"
 import { Identifier } from "./id/id"
+import { CommandV2 } from "./command"
+import fuzzysort from "fuzzysort"
 
 export const RevertState = Revert.State
 export type RevertState = Revert.State
@@ -131,6 +133,43 @@ export class InputNotPendingError extends Schema.TaggedErrorClass<InputNotPendin
 export const MessageNotFoundError = SessionRevert.MessageNotFoundError
 export type MessageNotFoundError = SessionRevert.MessageNotFoundError
 
+export class CommandNotFoundError extends Schema.TaggedErrorClass<CommandNotFoundError>()(
+  "Session.CommandNotFoundError",
+  {
+    command: Schema.String,
+    available: Schema.Array(Schema.String),
+  },
+) {
+  override get message() {
+    return `Command not found: "${this.command}".${suggest(this.command, this.available, "commands")}`
+  }
+}
+
+export class AgentNotFoundError extends Schema.TaggedErrorClass<AgentNotFoundError>()("Session.AgentNotFoundError", {
+  agent: Schema.String,
+  available: Schema.Array(Schema.String),
+}) {
+  override get message() {
+    return `Agent not found: "${this.agent}".${suggest(this.agent, this.available, "agents")}`
+  }
+}
+
+const suggest = (name: string, available: ReadonlyArray<string>, kind: string) => {
+  if (available.length === 0) return ""
+  const close = fuzzysort.go(name, [...available], { limit: 3 }).map((match) => match.target)
+  if (close.length > 0) return ` Did you mean: ${close.join(", ")}?`
+  return ` Available ${kind}: ${available.join(", ")}`
+}
+
+export type CommandResult =
+  | { readonly type: "prompt"; readonly input: SessionInput.Admitted }
+  | {
+      readonly type: "subtask"
+      readonly sessionID: SessionSchema.ID
+      readonly text: string
+      readonly error?: string
+    }
+
 export type Error =
   | NotFoundError
   | MessageDecodeError
@@ -138,6 +177,8 @@ export type Error =
   | PromptConflictError
   | InputNotPendingError
   | BusyError
+  | CommandNotFoundError
+  | AgentNotFoundError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
@@ -200,6 +241,30 @@ export interface Interface {
     command: string
     resume?: boolean
   }) => Effect.Effect<void, NotFoundError | BusyError>
+  /**
+   * Runs a registered slash command: expands its template, then either prompts this Session with the command's
+   * agent/model applied to that one prompt only, or dispatches a subagent and records its result here.
+   */
+  readonly command: (input: {
+    id?: SessionMessage.ID
+    sessionID: SessionSchema.ID
+    command: string
+    arguments?: string
+    /** The caller's current agent, used when the command names none. */
+    agent?: AgentV2.ID
+    /** The caller's current model, used when neither the command nor its agent names one. */
+    model?: ModelV2.Ref
+    files?: PromptInput.Prompt["files"]
+    delivery?: SessionInput.Delivery
+  }) => Effect.Effect<
+    CommandResult,
+    | NotFoundError
+    | PromptConflictError
+    | CommandNotFoundError
+    | AgentNotFoundError
+    | SessionRunnerModel.Error
+    | SessionRunner.RunError
+  >
   readonly skill: (input: {
     id?: EventV2.ID
     sessionID: SessionSchema.ID
@@ -511,6 +576,102 @@ const layer = Layer.effect(
         // its failures are already logged by the execution owner.
         yield* execution.resume(session.id).pipe(Effect.ignore, Effect.forkDetach({ startImmediately: true }))
       }),
+      command: Effect.fn("V2Session.command")(function* (input) {
+        const session = yield* result.get(input.sessionID)
+        return yield* Effect.gen(function* () {
+          const commands = yield* CommandV2.Service
+          const agents = yield* AgentV2.Service
+          const models = yield* SessionRunnerModel.Service
+          const config = yield* Config.Service
+          const command = yield* commands.get(input.command)
+          if (!command)
+            return yield* new CommandNotFoundError({
+              command: input.command,
+              available: (yield* commands.list()).map((item) => item.name),
+            })
+          const requested = command.agent ?? input.agent
+          const agent = yield* agents.select(requested ?? session.agent)
+          if (requested && !agent.info)
+            return yield* new AgentNotFoundError({
+              agent: requested,
+              available: (yield* agents.all()).filter((item) => !item.hidden).map((item) => item.id),
+            })
+          // Matches V1: an agent's own model only wins when the command itself names that agent.
+          const model =
+            command.model ?? (command.agent ? agent.info?.model : undefined) ?? input.model ?? session.model
+          // Fail before anything durable is recorded rather than on the first provider turn.
+          if (model) yield* models.resolve({ ...session, model })
+          const rendered = CommandV2.render(command.template, input.arguments ?? "")
+          // Expanded after argument substitution, as in V1, so a marker may use `$1`. The caller is the human
+          // typing the command, the same trust boundary as `shell`.
+          const markers = Array.from(rendered.matchAll(CommandV2.SHELL_PATTERN), (match) => match[1])
+          const shell =
+            markers.length === 0 ? undefined : Shell.preferred(Config.latest(yield* config.entries(), "shell"))
+          const outputs = shell
+            ? yield* Effect.forEach(
+                markers,
+                (marker) => runShell(appProcess, shell, marker, session.location.directory),
+                { concurrency: "unbounded" },
+              )
+            : []
+          const text = rendered.replace(CommandV2.SHELL_PATTERN, () => outputs.shift() ?? "").trim()
+          const subtask = (agent.info?.mode === "subagent" && command.subtask !== false) || command.subtask === true
+          if (!subtask) {
+            const sessionAgent = yield* agents.select(session.agent)
+            const admitted = yield* result.prompt({
+              id: input.id,
+              sessionID: session.id,
+              delivery: input.delivery,
+              prompt: {
+                text,
+                files: input.files,
+                ...(agent.id === sessionAgent.id ? {} : { agentOverride: agent.id }),
+                ...(model === undefined || sameModel(model, session.model) ? {} : { modelOverride: model }),
+              },
+            })
+            return { type: "prompt" as const, input: admitted }
+          }
+          // Dynamic: agent-dispatch imports this module, and a subtask dispatch is the only path that needs it.
+          const { WorkflowAgentDispatch } = yield* Effect.promise(() => import("./workflow/agent-dispatch"))
+          const dispatched = yield* WorkflowAgentDispatch.run({
+            location: session.location,
+            parentSessionID: session.id,
+            model,
+            persona: agent.info?.system ?? "",
+            permissions: agent.info?.permissions,
+            steps: agent.info?.steps,
+            prompt: { text, files: input.files },
+          }).pipe(
+            Effect.provideService(Service, result),
+            Effect.provideService(Database.Service, database),
+            // Only the structured-output tool registration fails this way, and no structured output is requested.
+            Effect.catchTag("Tool.RegistrationError", Effect.die),
+          )
+          const error = dispatched.error?.message
+          // Matches V1: the parent records the subagent's answer, then continues on its own agent and model.
+          yield* events.publish(SessionEvent.Synthetic, {
+            sessionID: session.id,
+            messageID: SessionMessage.ID.create(),
+            timestamp: yield* DateTime.now,
+            text: [
+              `The /${command.name} command ran in subagent session ${dispatched.sessionID}.`,
+              "",
+              `<task id="${dispatched.sessionID}">`,
+              error ? `Subagent failed: ${error}` : dispatched.text,
+              "</task>",
+              "",
+              "Summarize the task tool output above and continue with your task.",
+            ].join("\n"),
+          })
+          yield* execution.resume(session.id).pipe(Effect.ignore, Effect.forkDetach({ startImmediately: true }))
+          return {
+            type: "subtask" as const,
+            sessionID: dispatched.sessionID,
+            text: dispatched.text,
+            ...(error === undefined ? {} : { error }),
+          }
+        }).pipe(Effect.provide(locations.get(session.location).pipe(Layer.orDie)))
+      }),
       skill: Effect.fn("V2Session.skill")(function* () {
         return yield* new OperationUnavailableError({ operation: "skill" })
       }),
@@ -525,12 +686,7 @@ const layer = Layer.effect(
       }),
       switchModel: Effect.fn("V2Session.switchModel")(function* (input) {
         const session = yield* result.get(input.sessionID)
-        if (
-          session.model?.providerID === input.model.providerID &&
-          session.model.id === input.model.id &&
-          (session.model.variant ?? "default") === (input.model.variant ?? "default")
-        )
-          return
+        if (sameModel(input.model, session.model)) return
         yield* events.publish(SessionEvent.ModelSwitched, {
           sessionID: input.sessionID,
           messageID: SessionMessage.ID.create(),
@@ -637,11 +793,18 @@ const runShell = (appProcess: AppProcess.Interface, shell: string, command: stri
       ),
     )
 
+const sameModel = (model: ModelV2.Ref, current: ModelV2.Ref | undefined) =>
+  current?.providerID === model.providerID &&
+  current.id === model.id &&
+  (current.variant ?? "default") === (model.variant ?? "default")
+
 const resolvePrompt = (input: PromptInput.Prompt) =>
   Prompt.make({
     text: input.text,
     agents: input.agents,
     format: input.format,
+    agentOverride: input.agentOverride,
+    modelOverride: input.modelOverride,
     files: input.files?.map((file) => {
       const dataMime = file.uri.match(/^data:([^;,]+)[;,]/i)?.[1]
       const target = URL.canParse(file.uri) ? new URL(file.uri).pathname : (file.name ?? file.uri)

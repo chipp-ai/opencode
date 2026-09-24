@@ -49,6 +49,14 @@ export type ServiceUnavailableError = {
 export const isServiceUnavailableError = (value: unknown): value is ServiceUnavailableError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ServiceUnavailableError"
 
+export type UnknownError = {
+  readonly _tag: "UnknownError"
+  readonly message: string
+  readonly ref?: string | undefined
+}
+export const isUnknownError = (value: unknown): value is UnknownError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnknownError"
+
 export type MessageNotFoundError = {
   readonly _tag: "MessageNotFoundError"
   readonly sessionID: string
@@ -57,14 +65,6 @@ export type MessageNotFoundError = {
 }
 export const isMessageNotFoundError = (value: unknown): value is MessageNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "MessageNotFoundError"
-
-export type UnknownError = {
-  readonly _tag: "UnknownError"
-  readonly message: string
-  readonly ref?: string | undefined
-}
-export const isUnknownError = (value: unknown): value is UnknownError =>
-  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnknownError"
 
 export type ProviderNotFoundError = {
   readonly _tag: "ProviderNotFoundError"
@@ -439,6 +439,8 @@ export type SessionsPromptInput = {
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
       readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+      readonly agentOverride?: string
+      readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }
     readonly delivery?: "steer" | "queue" | null
     readonly resume?: boolean | null
@@ -458,6 +460,8 @@ export type SessionsPromptInput = {
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
       readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+      readonly agentOverride?: string
+      readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }
     readonly delivery?: "steer" | "queue" | null
     readonly resume?: boolean | null
@@ -477,6 +481,8 @@ export type SessionsPromptInput = {
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
       readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+      readonly agentOverride?: string
+      readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }
     readonly delivery?: "steer" | "queue" | null
     readonly resume?: boolean | null
@@ -496,6 +502,8 @@ export type SessionsPromptInput = {
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
       readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+      readonly agentOverride?: string
+      readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }
     readonly delivery?: "steer" | "queue" | null
     readonly resume?: boolean | null
@@ -521,6 +529,8 @@ export type SessionsPromptOutput = {
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
       readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+      readonly agentOverride?: string
+      readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }
     readonly delivery: "steer" | "queue"
     readonly timeCreated: number
@@ -550,6 +560,8 @@ export type SessionsListInputsOutput = {
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
       readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+      readonly agentOverride?: string
+      readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }
     readonly delivery: "steer" | "queue"
     readonly timeCreated: number
@@ -575,6 +587,8 @@ export type SessionsReviseInputInput = {
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
       readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+      readonly agentOverride?: string
+      readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }
   }["prompt"]
 }
@@ -598,6 +612,8 @@ export type SessionsReviseInputOutput = {
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
       readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+      readonly agentOverride?: string
+      readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     }
     readonly delivery: "steer" | "queue"
     readonly timeCreated: number
@@ -637,6 +653,142 @@ export type SessionsShellInput = {
 }
 
 export type SessionsShellOutput = void
+
+export type SessionsCommandInput = {
+  readonly sessionID: { readonly sessionID: string }["sessionID"]
+  readonly id?: {
+    readonly id?: string | null
+    readonly command: string
+    readonly arguments?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly delivery?: "steer" | "queue" | null
+  }["id"]
+  readonly command: {
+    readonly id?: string | null
+    readonly command: string
+    readonly arguments?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly delivery?: "steer" | "queue" | null
+  }["command"]
+  readonly arguments?: {
+    readonly id?: string | null
+    readonly command: string
+    readonly arguments?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly delivery?: "steer" | "queue" | null
+  }["arguments"]
+  readonly agent?: {
+    readonly id?: string | null
+    readonly command: string
+    readonly arguments?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly delivery?: "steer" | "queue" | null
+  }["agent"]
+  readonly model?: {
+    readonly id?: string | null
+    readonly command: string
+    readonly arguments?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly delivery?: "steer" | "queue" | null
+  }["model"]
+  readonly files?: {
+    readonly id?: string | null
+    readonly command: string
+    readonly arguments?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly delivery?: "steer" | "queue" | null
+  }["files"]
+  readonly delivery?: {
+    readonly id?: string | null
+    readonly command: string
+    readonly arguments?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly delivery?: "steer" | "queue" | null
+  }["delivery"]
+}
+
+export type SessionsCommandOutput = {
+  readonly data:
+    | {
+        readonly type: "prompt"
+        readonly input: {
+          readonly admittedSeq: number
+          readonly id: string
+          readonly sessionID: string
+          readonly prompt: {
+            readonly text: string
+            readonly files?: ReadonlyArray<{
+              readonly uri: string
+              readonly mime: string
+              readonly name?: string
+              readonly description?: string
+              readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+            }>
+            readonly agents?: ReadonlyArray<{
+              readonly name: string
+              readonly source?: { readonly start: number; readonly end: number; readonly text: string }
+            }>
+            readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+            readonly agentOverride?: string
+            readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+          }
+          readonly delivery: "steer" | "queue"
+          readonly timeCreated: number
+          readonly promotedSeq?: number
+          readonly withdrawnSeq?: number
+        }
+      }
+    | { readonly type: "subtask"; readonly sessionID: string; readonly text: string; readonly error?: string | null }
+}["data"]
 
 export type SessionsWaitInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
 
@@ -707,6 +859,8 @@ export type SessionsContextOutput = {
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
         readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+        readonly agentOverride?: string
+        readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
         readonly type: "user"
       }
     | {
@@ -911,6 +1065,8 @@ export type SessionsHistoryOutput = {
               readonly source?: { readonly start: number; readonly end: number; readonly text: string }
             }>
             readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+            readonly agentOverride?: string
+            readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
           }
           readonly delivery: "steer" | "queue"
         }
@@ -939,6 +1095,8 @@ export type SessionsHistoryOutput = {
               readonly source?: { readonly start: number; readonly end: number; readonly text: string }
             }>
             readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+            readonly agentOverride?: string
+            readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
           }
           readonly delivery: "steer" | "queue"
         }
@@ -975,6 +1133,8 @@ export type SessionsHistoryOutput = {
               readonly source?: { readonly start: number; readonly end: number; readonly text: string }
             }>
             readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+            readonly agentOverride?: string
+            readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
           }
         }
       }
@@ -1416,6 +1576,8 @@ export type SessionsEventsOutput =
             readonly source?: { readonly start: number; readonly end: number; readonly text: string }
           }>
           readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: unknown } }
+          readonly agentOverride?: string
+          readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
         }
         readonly delivery: "steer" | "queue"
       }
@@ -1444,6 +1606,8 @@ export type SessionsEventsOutput =
             readonly source?: { readonly start: number; readonly end: number; readonly text: string }
           }>
           readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: unknown } }
+          readonly agentOverride?: string
+          readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
         }
         readonly delivery: "steer" | "queue"
       }
@@ -1480,6 +1644,8 @@ export type SessionsEventsOutput =
             readonly source?: { readonly start: number; readonly end: number; readonly text: string }
           }>
           readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: unknown } }
+          readonly agentOverride?: string
+          readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
         }
       }
     }
@@ -1883,6 +2049,8 @@ export type SessionsMessageOutput = {
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
         readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+        readonly agentOverride?: string
+        readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
         readonly type: "user"
       }
     | {
@@ -2059,6 +2227,8 @@ export type MessagesListOutput = {
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
         readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
+        readonly agentOverride?: string
+        readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
         readonly type: "user"
       }
     | {

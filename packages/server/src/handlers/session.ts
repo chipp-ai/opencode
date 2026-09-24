@@ -5,6 +5,7 @@ import { Api } from "../api"
 import { SessionsCursor } from "@opencode-ai/protocol/groups/session"
 import {
   ConflictError,
+  InvalidRequestError,
   InvalidCursorError,
   MessageNotFoundError,
   ServiceUnavailableError,
@@ -257,6 +258,52 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               }),
             )
           return HttpApiSchema.NoContent.make()
+        }),
+      )
+      .handle(
+        "session.command",
+        Effect.fn(function* (ctx) {
+          return {
+            data: yield* session.command({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+              Effect.catchTags({
+                "Session.NotFoundError": inputErrors["Session.NotFoundError"],
+                "Session.PromptConflictError": (error) =>
+                  Effect.fail(
+                    new ConflictError({
+                      message: `Prompt message ID conflicts with an existing durable record: ${error.messageID}`,
+                      resource: error.messageID,
+                    }),
+                  ),
+                "Session.CommandNotFoundError": (error) =>
+                  Effect.fail(new InvalidRequestError({ message: error.message, field: "command" })),
+                "Session.AgentNotFoundError": (error) =>
+                  Effect.fail(new InvalidRequestError({ message: error.message, field: "agent" })),
+                "SessionRunnerModel.ModelUnavailableError": (error) =>
+                  Effect.fail(new InvalidRequestError({ message: error.message, field: "model" })),
+                "SessionRunnerModel.VariantUnavailableError": (error) =>
+                  Effect.fail(new InvalidRequestError({ message: error.message, field: "model" })),
+              }),
+              // Remaining failures come from resolving credentials or running the subagent itself.
+              Effect.catchIf(
+                (error) =>
+                  !(
+                    error instanceof ConflictError ||
+                    error instanceof InvalidRequestError ||
+                    error instanceof SessionNotFoundError
+                  ),
+                (error) => {
+                  const ref = `err_${crypto.randomUUID().slice(0, 8)}`
+                  return Effect.logError("failed to run session command", { cause: error, ref }).pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        new UnknownError({ message: "Unexpected server error. Check server logs for details.", ref }),
+                      ),
+                    ),
+                  )
+                },
+              ),
+            ),
+          }
         }),
       )
       .handle(

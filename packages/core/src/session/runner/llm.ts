@@ -222,8 +222,9 @@ const layer = Layer.effect(
       const session = yield* getSession(sessionID)
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
         return yield* Effect.interrupt
-      const agent = yield* agents.select(session.agent)
-      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent), session.id)
+      // The Context Epoch is Session-owned, so it always follows the Session's own agent, never a per-prompt override.
+      const sessionAgent = yield* agents.select(session.agent)
+      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(sessionAgent), session.id)
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
@@ -240,10 +241,20 @@ const layer = Layer.effect(
         if (requireInput && promoted === 0) return { needsContinuation: false, step: currentStep }
       }
       const system =
-        initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
-      const { model, info } = yield* models.resolve(session)
+        initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(sessionAgent), session.id))
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
+      // A one-shot override on the prompt being served (e.g. a slash command's agent/model) applies to every step
+      // answering it, and ends once newer input (a prompt, shell output, or a subtask result) is what the turn
+      // answers. It never switches the Session itself.
+      const served = context.findLast(
+        (message) => message.type === "user" || message.type === "synthetic" || message.type === "shell",
+      )
+      const agentOverride = served?.type === "user" ? served.agentOverride : undefined
+      const modelOverride = served?.type === "user" ? served.modelOverride : undefined
+      const agent = agentOverride ? yield* agents.select(agentOverride) : sessionAgent
+      const servedModel = modelOverride ?? session.model
+      const { model, info } = yield* models.resolve(modelOverride ? { ...session, model: modelOverride } : session)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
       const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
       // Forced on every step until satisfied, matching V1. On the final step it is the only advertised tool.
@@ -290,7 +301,7 @@ const layer = Layer.effect(
         model: {
           id: ModelV2.ID.make(model.id),
           providerID: ProviderV2.ID.make(model.provider),
-          ...(session.model?.variant === undefined ? {} : { variant: session.model.variant }),
+          ...(servedModel?.variant === undefined ? {} : { variant: servedModel.variant }),
         },
         snapshot: startSnapshot,
       })
@@ -300,7 +311,8 @@ const layer = Layer.effect(
       let overflowFailure: ProviderErrorEvent | undefined
       let fallbackFailure: ProviderErrorEvent | undefined
       let structured: unknown
-      const fallback = agent.info?.fallback ?? []
+      // Fallback durably switches the Session model, which a pinned one-shot model must never do.
+      const fallback = modelOverride ? [] : (agent.info?.fallback ?? [])
       const fallbackCircular = agent.info?.fallbackCircular ?? false
       const providerStream = llm.stream(request).pipe(
         Stream.runForEach((event) =>

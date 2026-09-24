@@ -133,6 +133,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             files: event.data.prompt.files,
             agents: event.data.prompt.agents,
             format: event.data.prompt.format,
+            agentOverride: event.data.prompt.agentOverride,
+            modelOverride: event.data.prompt.modelOverride,
             time: { created: event.data.timestamp },
           }),
         )
