@@ -55,7 +55,8 @@ import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Schema, Scope, Stream } from "effect"
+import { LocationServiceMap, type LocationError, type LocationServices } from "@opencode-ai/core/location-services"
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 
@@ -229,6 +230,15 @@ const config = Layer.succeed(
       ]),
   }),
 )
+// Manual compaction resolves its Location-scoped model and config through LocationServiceMap; serve only those.
+const locationServiceMap = Layer.effect(
+  LocationServiceMap.Service,
+  LayerMap.make(() => Layer.merge(models, config)) as unknown as Effect.Effect<
+    LayerMap.LayerMap<Location.Ref, LocationServices, LocationError>,
+    never,
+    Scope.Scope
+  >,
+)
 const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
   [Snapshot.node, Snapshot.noopLayer],
   [LayerNodePlatform.llmClient, client],
@@ -290,6 +300,7 @@ const it = testEffect(
       [Snapshot.node, Snapshot.noopLayer],
       [SessionExecution.node, execution],
       [Config.node, config],
+      [LocationServiceMap.node, locationServiceMap],
     ],
   ),
 )
@@ -396,6 +407,25 @@ const replaySessionProjection = (id: SessionV2.ID) =>
         data: event.data,
       })),
     )
+  })
+
+const compactionReasons = (id: SessionV2.ID) =>
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const rows = yield* db
+      .select({ type: EventTable.type, data: EventTable.data })
+      .from(EventTable)
+      .where(eq(EventTable.aggregate_id, id))
+      .orderBy(asc(EventTable.seq))
+      .all()
+      .pipe(Effect.orDie)
+    return rows
+      .filter(
+        (row) =>
+          row.type === EventV2.versionedType(SessionEvent.Compaction.Started.type, 1) ||
+          row.type === EventV2.versionedType(SessionEvent.Compaction.Ended.type, 1),
+      )
+      .map((row) => `${row.type.includes("started") ? "started" : "ended"}:${String(row.data.reason)}`)
   })
 
 type FragmentKind = "text" | "reasoning" | "tool input"
@@ -1127,6 +1157,7 @@ describe("SessionRunnerLLM", () => {
         type: "compaction",
         summary: "## Objective\n- Preserve the task",
       })
+      expect(yield* compactionReasons(sessionID)).toEqual(["started:auto", "ended:auto"])
 
       requests.length = 0
       executions.length = 0
@@ -1150,6 +1181,94 @@ describe("SessionRunnerLLM", () => {
         type: "compaction",
         summary: "## Objective\n- Preserve the updated task",
       })
+    }),
+  )
+
+  it.effect("manually compacts real history regardless of the automatic threshold", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      response = fragmentFixture("text", "text-first", ["First answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First question ".repeat(700) }), resume: false })
+      yield* session.resume(sessionID)
+      response = fragmentFixture("text", "text-second", ["Second answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second question" }), resume: false })
+      yield* session.resume(sessionID)
+
+      // Large enough that the automatic threshold would never fire for this history.
+      currentModel = recoveryModel
+      requests.length = 0
+      responses = [fragmentFixture("text", "text-summary", ["## Objective\n- Manual summary"]).completeEvents]
+      yield* session.compact({ sessionID })
+
+      expect(requests).toHaveLength(1)
+      expect(requests[0].http?.headers).toEqual({ "x-session-affinity": sessionID, "X-Session-Id": sessionID })
+      expect(requests[0].tools).toEqual([])
+      expect(userTexts(requests[0])[0]).toContain("Create a new anchored summary")
+      expect(userTexts(requests[0])[0]).toContain("[User]: First question")
+      expect(yield* compactionReasons(sessionID)).toEqual(["started:manual", "ended:manual"])
+      const context = yield* session.context(sessionID)
+      expect(context[0]).toMatchObject({ type: "compaction", summary: "## Objective\n- Manual summary" })
+      expect(context.map((message) => message.type)).toEqual(["compaction"])
+
+      // The next provider turn sees the manual summary instead of the full history.
+      requests.length = 0
+      response = fragmentFixture("text", "text-after", ["After compaction"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third question" }), resume: false })
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(1)
+      expect(userTexts(requests[0])[0]).toContain("<summary>\n## Objective\n- Manual summary\n</summary>")
+      expect(userTexts(requests[0]).join("\n")).not.toContain("First question First question")
+    }),
+  )
+
+  it.effect("leaves a session with nothing worth compacting unchanged", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      currentModel = recoveryModel
+      requests.length = 0
+      yield* session.compact({ sessionID })
+      expect(requests).toHaveLength(0)
+
+      response = fragmentFixture("text", "text-short", ["Short answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Short question" }), resume: false })
+      yield* session.resume(sessionID)
+      requests.length = 0
+      yield* session.compact({ sessionID })
+
+      expect(requests).toHaveLength(0)
+      expect(yield* compactionReasons(sessionID)).toEqual([])
+      expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual(["user", "assistant"])
+    }),
+  )
+
+  it.effect("wakes admitted input after manual compaction", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      response = fragmentFixture("text", "text-first", ["First answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First question ".repeat(700) }), resume: false })
+      yield* session.resume(sessionID)
+      response = fragmentFixture("text", "text-second", ["Second answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second question" }), resume: false })
+      yield* session.resume(sessionID)
+
+      currentModel = recoveryModel
+      requests.length = 0
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Pending question" }), resume: false })
+      responses = [
+        fragmentFixture("text", "text-summary", ["## Objective\n- Manual summary"]).completeEvents,
+        fragmentFixture("text", "text-pending", ["Pending answer"]).completeEvents,
+      ]
+      yield* session.compact({ sessionID })
+      yield* session.wait(sessionID)
+
+      expect(requests).toHaveLength(2)
+      expect(userTexts(requests[0])[0]).not.toContain("Pending question")
+      expect(userTexts(requests[1]).join("\n")).toContain("<summary>\n## Objective\n- Manual summary\n</summary>")
+      expect(userTexts(requests[1]).join("\n")).toContain("Pending question")
+      expect(yield* SessionInput.listPending((yield* Database.Service).db, sessionID)).toEqual([])
     }),
   )
 

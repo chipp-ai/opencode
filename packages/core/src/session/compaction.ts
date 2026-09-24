@@ -80,6 +80,8 @@ type Input = {
   readonly request: LLMRequest
 }
 
+type Reason = SessionEvent.Compaction.Started["data"]["reason"]
+
 const estimate = (value: unknown) => Token.estimate(JSON.stringify(value))
 
 const truncate = (value: string) =>
@@ -175,7 +177,10 @@ export const buildPrompt = (input: { readonly previousSummary?: string; readonly
 
 export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)
-  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input) {
+  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (
+    input: Input,
+    reason: Reason,
+  ) {
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
@@ -193,7 +198,7 @@ export const make = (dependencies: Dependencies) => {
       sessionID: input.sessionID,
       messageID,
       timestamp: yield* DateTime.now,
-      reason: "auto",
+      reason,
     })
 
     const chunks: string[] = []
@@ -223,7 +228,7 @@ export const make = (dependencies: Dependencies) => {
       sessionID: input.sessionID,
       messageID,
       timestamp: yield* DateTime.now,
-      reason: "auto",
+      reason,
       text: summary,
       recent: selected.recent,
     })
@@ -239,7 +244,7 @@ export const make = (dependencies: Dependencies) => {
       context - Math.max(output, config.buffer)
     )
       return false
-    return yield* compactAfterOverflow(input)
+    return yield* compactAfterOverflow(input, "auto")
   })
   return {
     compactIfNeeded,

@@ -636,23 +636,75 @@ describe("session HttpApi", () => {
     { git: true, config: { formatter: false, lsp: false } },
   )
 
-  it.instance(
-    "returns a v2 public unavailable error for the still-unfinished session compact mutation",
-    () =>
-      Effect.gen(function* () {
-        const test = yield* TestInstance
-        const headers = { "x-opencode-directory": test.directory }
-        const session = yield* createSession({ title: "v2 unavailable" })
+  it.live("manually compacts a v2 session end-to-end", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      const directory = yield* tmpdirScoped({ git: true })
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(directory, "opencode.json"),
+          JSON.stringify({
+            providers: {
+              test: {
+                api: { type: "aisdk", package: "@ai-sdk/openai-compatible", url: llm.url, settings: {} },
+                request: { body: { apiKey: "test-key" } },
+                models: { "test-model": { limit: { context: 100_000, output: 10_000 } } },
+              },
+            },
+          }),
+        ),
+      )
+      const headers = { "x-opencode-directory": directory }
+      const created = yield* requestJson<{ data: { id: string } }>("/api/session", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: { providerID: "test", id: "test-model" },
+          location: { directory },
+        }),
+      })
+      const session = created.data
+      // Location plugins populate the V2 catalog asynchronously after the Location boots.
+      yield* pollWithTimeout(
+        requestJson<{ data: { id: string }[] }>("/api/provider", { headers }).pipe(
+          Effect.map(({ data }) => data.find((provider) => provider.id === "test")),
+        ),
+        "configured test provider never reached the V2 catalog",
+      )
 
-        const compact = yield* request(`/api/session/${session.id}/compact`, { method: "POST", headers })
-        expect(compact.status).toBe(503)
-        expect(yield* responseJson(compact)).toEqual({
-          _tag: "ServiceUnavailableError",
-          message: "Session compact is not available yet",
-          service: "session.compact",
-        })
-      }),
-    { git: true, config: { formatter: false, lsp: false } },
+      // Enough history that the default keep window leaves an older head to summarize.
+      yield* llm.text("first answer", { usage: { input: 1, output: 1 } })
+      const prompt = yield* request(`/api/session/${session.id}/prompt`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ prompt: { text: "older context ".repeat(3_000) } }),
+      })
+      expect(prompt.status).toBe(200)
+      const waited = yield* request(`/api/session/${session.id}/wait`, { method: "POST", headers })
+      expect(waited.status).toBe(204)
+      yield* llm.text("second answer", { usage: { input: 1, output: 1 } })
+      yield* request(`/api/session/${session.id}/prompt`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ prompt: { text: "recent question" } }),
+      })
+      const waitedAgain = yield* request(`/api/session/${session.id}/wait`, { method: "POST", headers })
+      expect(waitedAgain.status).toBe(204)
+
+      yield* llm.text("## Objective\n- manual summary", { usage: { input: 1, output: 1 } })
+      const compact = yield* request(`/api/session/${session.id}/compact`, { method: "POST", headers })
+      expect(compact.status).toBe(204)
+      const summarize = (yield* llm.hits).filter((hit) =>
+        JSON.stringify(hit.body).includes("Create a new anchored summary"),
+      )
+      expect(summarize).toHaveLength(1)
+      expect(JSON.stringify(summarize[0].body)).toContain("older context")
+
+      const context = yield* requestJson<{ data: SessionMessage.Message[] }>(`/api/session/${session.id}/context`, {
+        headers,
+      })
+      expect(context.data[0]).toMatchObject({ type: "compaction", summary: "## Objective\n- manual summary" })
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 
   // session.wait is implemented for real (SessionRunCoordinator.join) -- an idle session (no

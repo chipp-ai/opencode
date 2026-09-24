@@ -345,7 +345,7 @@ const layer = Layer.effect(
             recoverOverflow &&
             !publisher.hasAssistantStarted() &&
             isContextOverflowFailure(overflowFailure ?? failure) &&
-            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request })))
+            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request }, "auto")))
           )
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
           if (

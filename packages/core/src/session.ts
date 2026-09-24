@@ -39,6 +39,12 @@ import { SessionRevert } from "./session/revert"
 import { Revert } from "@opencode-ai/schema/revert"
 import { FSUtil } from "./fs-util"
 import { SessionDurable } from "@opencode-ai/schema/durable-event-manifest"
+import { LLM, LLMClient } from "@opencode-ai/llm"
+import { SessionCompaction } from "./session/compaction"
+import { SessionHistory } from "./session/history"
+import { SessionRunnerModel } from "./session/runner/model"
+import { Config } from "./config"
+import { llmClient } from "./effect/app-node-platform"
 
 export const RevertState = Revert.State
 export type RevertState = Revert.State
@@ -220,6 +226,7 @@ const layer = Layer.effect(
     const execution = yield* SessionExecution.Service
     const store = yield* SessionStore.Service
     const locations = yield* LocationServiceMap.Service
+    const llm = yield* LLMClient.Service
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
     const decode = (row: typeof SessionMessageTable.$inferSelect) =>
@@ -486,8 +493,28 @@ const layer = Layer.effect(
         })
       }),
       compact: Effect.fn("V2Session.compact")(function* (input) {
-        yield* result.get(input.sessionID)
-        return yield* new OperationUnavailableError({ operation: "compact" })
+        const session = yield* result.get(input.sessionID)
+        yield* Effect.gen(function* () {
+          const models = yield* SessionRunnerModel.Service
+          const config = yield* Config.Service
+          const resolved = yield* models.resolve(session)
+          const compaction = SessionCompaction.make({ events, llm, config: yield* config.entries() })
+          // Manual compaction skips the auto/threshold gate; compaction only reads `http` and
+          // `generation` from the request, so no turn-shaped system/messages/tools are needed.
+          yield* compaction.compactAfterOverflow(
+            {
+              sessionID: session.id,
+              entries: yield* SessionHistory.entriesForRunner(db, session.id, 0),
+              model: resolved.model,
+              request: LLM.request({
+                model: resolved.model,
+                http: { headers: { "x-session-affinity": session.id, "X-Session-Id": session.id } },
+              }),
+            },
+            "manual",
+          )
+        }).pipe(Effect.provide(locations.get(session.location)), Effect.orDie)
+        yield* execution.wake(session.id)
       }),
       wait: Effect.fn("V2Session.wait")(function* (sessionID) {
         yield* result.get(sessionID)
@@ -556,5 +583,6 @@ export const node = makeGlobalNode({
     SessionStore.node,
     LocationServiceMap.node,
     SessionProjector.node,
+    llmClient,
   ],
 })
