@@ -60,6 +60,9 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   lspIdleTimeoutMs: positiveInteger("OPENCODE_LSP_IDLE_TIMEOUT_MS"),
   // Opt-in: loaded instances with no lease holder and no activity for this long are disposed.
   instanceIdleTimeoutMs: positiveInteger("OPENCODE_INSTANCE_IDLE_TIMEOUT_MS"),
+  // Opt-in, and deliberately not enabled by OPENCODE_EXPERIMENTAL: truncating the durable event log can break
+  // replay for consumers that need the full payload back.
+  eventRedact: bool("OPENCODE_EVENT_REDACT_ENABLED"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),
   experimentalWebSockets: bool("OPENCODE_EXPERIMENTAL_WEBSOCKETS"),
   client: Config.string("OPENCODE_CLIENT").pipe(Config.withDefault("cli")),

@@ -12,6 +12,7 @@ import { disposeMiddleware } from "./routes/instance/httpapi/lifecycle"
 import { WebSocketTracker } from "./routes/instance/httpapi/websocket-tracker"
 import { PublicApi } from "./routes/instance/httpapi/public"
 import type { CorsOptions } from "@opencode-ai/server/cors"
+import type { EventV2 } from "@opencode-ai/core/event"
 import { lazy } from "@/util/lazy"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
@@ -29,11 +30,16 @@ type ServerApp = {
   request(input: string | URL | Request, init?: RequestInit): Response | Promise<Response>
 }
 
-type ListenOptions = CorsOptions & {
+export type ListenOptions = CorsOptions & {
   port: number
   hostname: string
   mdns?: boolean
   mdnsDomain?: string
+  /**
+   * Embedder hook applied to each durable event payload before it is written to the event log. Overrides
+   * `OPENCODE_EVENT_REDACT_ENABLED`. Must be pure and idempotent; see `EventV2.LayerOptions["persist"]`.
+   */
+  persist?: EventV2.LayerOptions["persist"]
 }
 type ListenerState = {
   scope: Scope.Scope
@@ -90,7 +96,7 @@ const listenEffect: (opts: ListenOptions) => Effect.Effect<EffectListener, unkno
 )
 
 function listenerLayer(opts: ListenOptions, port: number) {
-  return HttpRouter.serve(HttpApiApp.createRoutes(opts), {
+  return HttpRouter.serve(HttpApiApp.createRoutes(opts, { persist: opts.persist }), {
     middleware: disposeMiddleware,
     disableLogger: true,
     disableListenLog: true,

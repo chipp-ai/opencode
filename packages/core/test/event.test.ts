@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventPersistPolicy } from "@opencode-ai/core/event/persist-policy"
@@ -1200,6 +1200,43 @@ describe("EventV2", () => {
           expect(stored[0]).toStartWith("[REDACTED:openai-key] xxx")
         }),
       ),
+    )
+
+    const publishTitle = (title: string) =>
+      Effect.gen(function* () {
+        const events = yield* EventV2.Service
+        const sessionID = Session.ID.create()
+        yield* events.publish(SessionEvent.TitleChanged, { sessionID, timestamp: DateTime.makeUnsafe(1), title })
+        return yield* storedTitles(sessionID)
+      })
+
+    // Plain `test`: the file's `it` harness shares a memo map in which the module-level `EventV2.node` layer is
+    // already built without the Reference, and layers are memoized by identity.
+    test("applies EventV2.Persist provided beneath the bound global node", async () => {
+      const stored = await Effect.runPromise(
+        publishTitle(`leaked ${secret}`).pipe(
+          Effect.provide(
+            AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node])).pipe(
+              Layer.provide(Layer.succeed(EventV2.Persist, EventPersistPolicy.apply)),
+            ),
+          ),
+        ),
+      )
+      expect(stored).toEqual(["leaked [REDACTED:openai-key]"])
+    })
+
+    it.effect("prefers an explicit layerWith persist option over EventV2.Persist", () =>
+      Effect.gen(function* () {
+        const database = LayerNode.compile(Database.node)
+        const eventLayer = EventV2.layerWith({ persist: (data) => ({ ...data, title: "explicit" }) }).pipe(
+          Layer.provide(database),
+          Layer.provide(Layer.succeed(EventV2.Persist, EventPersistPolicy.apply)),
+        )
+        const stored = yield* publishTitle(`leaked ${secret}`).pipe(
+          Effect.provide(Layer.merge(database, eventLayer)),
+        )
+        expect(stored).toEqual(["explicit"])
+      }),
     )
   })
 })

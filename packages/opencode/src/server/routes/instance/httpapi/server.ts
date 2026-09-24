@@ -50,6 +50,7 @@ import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Worktree } from "@/worktree"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { EventPersist } from "@/effect/event-persist"
 import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
@@ -273,8 +274,14 @@ const app = LayerNode.group([
   WorkflowRegistry.node,
 ])
 
+export type RouteOptions = {
+  /** Transforms each durable event payload before it is written to the event log; see `EventV2.LayerOptions`. */
+  readonly persist?: EventV2.LayerOptions["persist"]
+}
+
 export function createRoutes(
   corsOptions?: CorsOptions,
+  options?: RouteOptions,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
   // Real implementation of the `SessionDispatchPort` unbound node the `task` tool depends on
   // (see `@opencode-ai/core/session/dispatch-port`'s own doc comment for why it exists). A *raw*
@@ -324,6 +331,10 @@ export function createRoutes(
     Layer.provide(locationServiceMapV2),
 
     Layer.provide(AppNodeBuilderV1.build(app)),
+    // Not a `[EventV2.node, layer]` replacement: EventV2 is shared by every compile pass above (and the
+    // module-level Location service maps inside route handlers), so a per-pass replacement would build a second,
+    // disconnected instance. A Reference provided beneath all of them reaches the single memoized build.
+    Layer.provide(EventPersist.layer(options?.persist)),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,
     // so Observability must come after every service graph. Otherwise eagerly forked
     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout
