@@ -53,6 +53,14 @@ export const ModelSwitched = Schema.Struct({
   model: Model.Ref,
 }).annotate({ identifier: "Session.Message.ModelSwitched" })
 
+/** A turn that failed before any assistant message existed to carry its error. Never sent to the model. */
+export interface TurnFailed extends Schema.Schema.Type<typeof TurnFailed> {}
+export const TurnFailed = Schema.Struct({
+  ...Base,
+  type: Schema.Literal("turn-failed"),
+  error: UnknownError,
+}).annotate({ identifier: "Session.Message.TurnFailed" })
+
 export interface User extends Schema.Schema.Type<typeof User> {}
 export const User = Schema.Struct({
   ...Base,
@@ -217,6 +225,7 @@ export const Compaction = Schema.Struct({
 export const Message = Schema.Union([
   AgentSwitched,
   ModelSwitched,
+  TurnFailed,
   User,
   Synthetic,
   System,
@@ -226,5 +235,14 @@ export const Message = Schema.Union([
 ])
   .pipe(Schema.toTaggedUnion("type"))
   .annotate({ identifier: "Session.Message" })
-export type Message = AgentSwitched | ModelSwitched | User | Synthetic | System | Shell | Assistant | Compaction
+export type Message =
+  | AgentSwitched
+  | ModelSwitched
+  | TurnFailed
+  | User
+  | Synthetic
+  | System
+  | Shell
+  | Assistant
+  | Compaction
 export type Type = Message["type"]

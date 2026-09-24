@@ -95,7 +95,8 @@ import {
   toV1Transcript,
   V2_UNAVAILABLE_COMMANDS,
   v2UnavailableMessage,
-  type V2Switch,
+  type V2Marker,
+  type V2TurnFailed,
 } from "../../util/v2-session"
 import { errorTarget, findMatches, highlightSegments, stepIndex } from "../../util/session-find"
 import { SessionFindBar } from "./find"
@@ -251,11 +252,11 @@ export function Session() {
   const [v2Transcript, setV2Transcript] = createStore<{
     messages: Message[]
     parts: Record<string, Part[]>
-    switches: Record<string, V2Switch[]>
+    markers: Record<string, V2Marker[]>
   }>({
     messages: [],
     parts: {},
-    switches: {},
+    markers: {},
   })
   createEffect(() => {
     if (!v2()) return
@@ -272,7 +273,7 @@ export function Session() {
     })
     setV2Transcript("messages", reconcile(transcript.messages))
     setV2Transcript("parts", reconcile(transcript.parts))
-    setV2Transcript("switches", reconcile(transcript.switches))
+    setV2Transcript("markers", reconcile(transcript.markers))
   })
   const [loadingOlder, setLoadingOlder] = createSignal(false)
   function loadOlderMessages() {
@@ -286,7 +287,7 @@ export function Session() {
       })
       .finally(() => setLoadingOlder(false))
   }
-  const switchesAfter = (id: string) => (v2() ? v2Transcript.switches[id] : undefined) ?? []
+  const markersAfter = (id: string) => (v2() ? v2Transcript.markers[id] : undefined) ?? []
   const messages = createMemo(() => (v2() ? v2Transcript.messages : (sync.data.message[route.sessionID] ?? [])))
   const partsFor = (messageID: string) => (v2() ? v2Transcript.parts[messageID] : sync.data.part[messageID]) ?? []
   const messagesBeforeRevert = () => {
@@ -598,6 +599,34 @@ export function Session() {
           local.model.variant.set(model.model.variant)
           toast.show({ title: "Model switched", message: switchLabel(model, providers()), variant: "info" })
         }
+      },
+      { defer: true },
+    ),
+  )
+
+  // A turn that fails before any assistant message exists only leaves a marker row, which can be scrolled
+  // out of view; announce a live one so the prompt never looks like it was silently dropped.
+  createEffect(
+    on(
+      () => {
+        if (!v2()) return undefined
+        const failure = (data.session.message.list(route.sessionID) ?? []).find(
+          (message): message is V2TurnFailed => message.type === "turn-failed",
+        )
+        return { sessionID: route.sessionID, failure }
+      },
+      (current, previous) => {
+        const failure = current?.failure
+        if (!failure) return
+        if (
+          !liveSwitch(
+            previous && { sessionID: previous.sessionID, id: previous.failure?.id },
+            { sessionID: current.sessionID, id: failure.id, created: failure.time.created },
+            openedAt(),
+          )
+        )
+          return
+        toast.show({ title: "Turn failed", message: failure.error.message, variant: "error", duration: 8000 })
       },
       { defer: true },
     ),
@@ -1449,7 +1478,7 @@ export function Session() {
                     </text>
                   </box>
                 </Show>
-                <For each={switchesAfter("")}>{(item) => <SwitchMarker item={item} />}</For>
+                <For each={markersAfter("")}>{(item) => <TranscriptMarker item={item} />}</For>
                 <For each={messages()}>
                   {(message, index) => (
                     <>
@@ -1553,7 +1582,7 @@ export function Session() {
                           />
                         </Match>
                       </Switch>
-                      <For each={switchesAfter(message.id)}>{(item) => <SwitchMarker item={item} />}</For>
+                      <For each={markersAfter(message.id)}>{(item) => <TranscriptMarker item={item} />}</For>
                     </>
                   )}
                 </For>
@@ -1768,16 +1797,40 @@ function UserMessage(props: {
   )
 }
 
-// Muted marker for a durable V2 agent/model switch, styled like the assistant footer row.
-function SwitchMarker(props: { item: V2Switch }) {
+// Marker row for a durable V2 event with no V1 message shape: a muted agent/model switch, styled like the
+// assistant footer row, or a turn that failed before any assistant message existed, styled like its error box.
+function TranscriptMarker(props: { item: V2Marker }) {
   const ctx = use()
   const { theme } = useTheme()
+  const item = props.item
+  if (item.type === "turn-failed")
+    return (
+      <box
+        ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+        border={["left"]}
+        paddingTop={1}
+        paddingBottom={1}
+        paddingLeft={2}
+        marginTop={1}
+        backgroundColor={theme.backgroundPanel}
+        customBorderChars={SplitBorder.customBorderChars}
+        borderColor={theme.error}
+        flexShrink={0}
+      >
+        <text fg={theme.textMuted}>
+          {item.error.message}
+          <Show when={ctx.showTimestamps()}>
+            <span> · {Locale.todayTimeOrDateTime(item.time.created)}</span>
+          </Show>
+        </text>
+      </box>
+    )
   return (
     <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} flexShrink={0}>
       <text marginTop={1} fg={theme.textMuted}>
-        ⇄ {switchLabel(props.item, ctx.providers())}
+        ⇄ {switchLabel(item, ctx.providers())}
         <Show when={ctx.showTimestamps()}>
-          <span> · {Locale.todayTimeOrDateTime(props.item.time.created)}</span>
+          <span> · {Locale.todayTimeOrDateTime(item.time.created)}</span>
         </Show>
       </text>
     </box>

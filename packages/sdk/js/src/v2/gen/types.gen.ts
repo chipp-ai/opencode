@@ -18,6 +18,7 @@ export type Event =
   | EventMessagePartRemoved
   | EventSessionNextAgentSwitched
   | EventSessionNextModelSwitched
+  | EventSessionNextTurnFailed
   | EventSessionNextTitleChanged
   | EventSessionNextMoved
   | EventSessionNextPrompted
@@ -848,6 +849,16 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.turn.failed"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+          error: SessionErrorUnknown
+        }
+      }
+    | {
+        id: string
         type: "session.next.title.changed"
         properties: {
           timestamp: number
@@ -1666,6 +1677,7 @@ export type GlobalEvent = {
     | SyncEventMessagePartRemoved
     | SyncEventSessionNextAgentSwitched
     | SyncEventSessionNextModelSwitched
+    | SyncEventSessionNextTurnFailed
     | SyncEventSessionNextTitleChanged
     | SyncEventSessionNextMoved
     | SyncEventSessionNextPrompted
@@ -2822,6 +2834,7 @@ export type MessageNotFoundError = {
 export type SessionDurableEvent =
   | SessionNextAgentSwitched
   | SessionNextModelSwitched
+  | SessionNextTurnFailed
   | SessionNextTitleChanged
   | SessionNextMoved
   | SessionNextPrompted
@@ -2979,6 +2992,7 @@ export type V2Event =
   | MessagePartRemoved
   | SessionNextAgentSwitched
   | SessionNextModelSwitched
+  | SessionNextTurnFailed
   | SessionNextTitleChanged
   | SessionNextMoved
   | SessionNextPrompted
@@ -3171,6 +3185,11 @@ export type ModelRef = {
   variant?: string
 }
 
+export type SessionErrorUnknown = {
+  type: "unknown"
+  message: string
+}
+
 export type LocationRef = {
   directory: string
   workspaceID?: string
@@ -3224,6 +3243,18 @@ export type SessionMessageModelSwitched = {
   }
   type: "model-switched"
   model: ModelRef
+}
+
+export type SessionMessageTurnFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+  }
+  type: "turn-failed"
+  error: SessionErrorUnknown
 }
 
 export type SessionMessageUser = {
@@ -3350,11 +3381,6 @@ export type SessionMessageToolStateCompleted = {
   result?: unknown
 }
 
-export type SessionErrorUnknown = {
-  type: "unknown"
-  message: string
-}
-
 export type SessionMessageToolStateError = {
   status: "error"
   input: {
@@ -3447,6 +3473,7 @@ export type SessionMessageCompaction = {
 export type SessionMessage =
   | SessionMessageAgentSwitched
   | SessionMessageModelSwitched
+  | SessionMessageTurnFailed
   | SessionMessageUser
   | SessionMessageSynthetic
   | SessionMessageSystem
@@ -3692,6 +3719,23 @@ export type SyncEventSessionNextModelSwitched = {
       sessionID: string
       messageID: string
       model: ModelRef
+    }
+  }
+}
+
+export type SyncEventSessionNextTurnFailed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.turn.failed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+      error: SessionErrorUnknown
     }
   }
 }
@@ -4431,6 +4475,26 @@ export type SessionNextModelSwitched = {
     sessionID: string
     messageID: string
     model: ModelRef
+  }
+}
+
+export type SessionNextTurnFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.turn.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    error: SessionErrorUnknown
   }
 }
 
@@ -6591,6 +6655,17 @@ export type EventSessionNextModelSwitched = {
     sessionID: string
     messageID: string
     model: ModelRef
+  }
+}
+
+export type EventSessionNextTurnFailed = {
+  id: string
+  type: "session.next.turn.failed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    error: SessionErrorUnknown
   }
 }
 

@@ -593,7 +593,24 @@ const layer = Layer.effect(
     })
 
     return Service.of({
-      run,
+      run: (input) =>
+        run(input).pipe(
+          Effect.tapCause((cause) => {
+            if (Cause.hasInterrupts(cause)) return Effect.void
+            const failure = Cause.squash(cause)
+            // Provider failures are already recorded on their assistant step. Anything else (model resolution,
+            // context loading, a defect) has no message to carry it, so without this the turn fails silently.
+            if (failure instanceof LLMError) return Effect.void
+            return Effect.gen(function* () {
+              yield* events.publish(SessionEvent.TurnFailed, {
+                sessionID: input.sessionID,
+                messageID: SessionMessage.ID.create(),
+                timestamp: yield* DateTime.now,
+                error: { type: "unknown", message: failure instanceof Error ? failure.message : String(failure) },
+              })
+            }).pipe(Effect.catchCause((recordCause) => Effect.logError("Failed to record turn failure", recordCause)))
+          }),
+        ),
     })
   }),
 )

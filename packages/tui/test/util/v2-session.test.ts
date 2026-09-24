@@ -398,13 +398,55 @@ describe("toV1Transcript switches", () => {
 
   test("anchors each switch after the entry it follows, oldest first", () => {
     const ids = Object.fromEntries(
-      Object.entries(transcript.switches).map(([key, list]) => [key, list.map((item) => item.id)]),
+      Object.entries(transcript.markers).map(([key, list]) => [key, list.map((item) => item.id)]),
     )
     expect(ids).toEqual({ "": ["msg_m0"], msg_u: ["msg_g", "msg_m"] })
   })
 
   test("keeps switches out of the V1 message list", () => {
     expect(transcript.messages.map((message) => message.id)).toEqual(["msg_u", "msg_a2"])
+  })
+})
+
+describe("toV1Transcript turn failures", () => {
+  const model = { providerID: "fake", id: "primary" }
+  // Newest-first: a first prompt fails before any assistant step, a switch, then a retried prompt is answered.
+  const transcript = toV1Transcript({
+    sessionID: "ses_1",
+    directory: "/repo",
+    agent: "build",
+    model,
+    messages: [
+      {
+        id: "msg_a",
+        type: "assistant",
+        agent: "build",
+        model,
+        time: { created: 6, completed: 7 },
+        content: [{ type: "text", id: "t", text: "ok" }],
+      },
+      { id: "msg_u2", type: "user", text: "again", time: { created: 5 } },
+      { id: "msg_m", type: "model-switched", model, time: { created: 4 } },
+      {
+        id: "msg_f",
+        type: "turn-failed",
+        error: { type: "unknown", message: "Model unavailable: openrouter/~z-ai/glm-flash-latest" },
+        time: { created: 3 },
+      },
+      { id: "msg_u1", type: "user", text: "hi", time: { created: 2 } },
+    ],
+  })
+
+  test("anchors the failure after the prompt it answered, ordered with switches", () => {
+    expect(transcript.markers.msg_u1?.map((item) => item.id)).toEqual(["msg_f", "msg_m"])
+    expect(transcript.markers.msg_u1?.[0]).toMatchObject({
+      type: "turn-failed",
+      error: { message: "Model unavailable: openrouter/~z-ai/glm-flash-latest" },
+    })
+  })
+
+  test("keeps failures out of the V1 message list", () => {
+    expect(transcript.messages.map((message) => message.id)).toEqual(["msg_u1", "msg_u2", "msg_a"])
   })
 })
 

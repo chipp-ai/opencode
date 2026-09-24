@@ -122,6 +122,16 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }),
         )
       },
+      "session.next.turn.failed": (event) =>
+        adapter.appendMessage(
+          SessionMessage.TurnFailed.make({
+            id: event.data.messageID,
+            type: "turn-failed",
+            metadata: event.metadata,
+            error: event.data.error,
+            time: { created: event.data.timestamp },
+          }),
+        ),
       "session.next.moved": () => Effect.void,
       "session.next.prompted": (event) => {
         return adapter.appendMessage(

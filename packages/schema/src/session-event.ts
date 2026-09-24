@@ -73,6 +73,18 @@ export const ModelSwitched = Event.define({
 })
 export type ModelSwitched = typeof ModelSwitched.Type
 
+// Recorded when a turn fails before any assistant step exists to carry the error, e.g. an unavailable model.
+export const TurnFailed = Event.define({
+  type: "session.next.turn.failed",
+  ...options,
+  schema: {
+    ...Base,
+    messageID: SessionMessage.ID,
+    error: UnknownError,
+  },
+})
+export type TurnFailed = typeof TurnFailed.Type
+
 export const TitleChanged = Event.define({
   type: "session.next.title.changed",
   ...options,
@@ -509,6 +521,7 @@ export namespace RevertEvent {
 export const DurableDefinitions = Event.inventory(
   AgentSwitched,
   ModelSwitched,
+  TurnFailed,
   TitleChanged,
   Moved,
   Prompted,
@@ -544,6 +557,7 @@ export const DurableDefinitions = Event.inventory(
 export const Definitions = Event.inventory(
   AgentSwitched,
   ModelSwitched,
+  TurnFailed,
   TitleChanged,
   Moved,
   Prompted,

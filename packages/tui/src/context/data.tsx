@@ -214,6 +214,16 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             })
           })
           break
+        case "session.next.turn.failed":
+          message.update(event.data.sessionID, (draft) => {
+            message.prepend(draft, {
+              id: event.data.messageID,
+              type: "turn-failed",
+              error: event.data.error,
+              time: { created: event.data.timestamp },
+            })
+          })
+          break
         case "session.next.prompted": {
           removeInput(event.data.sessionID, event.data.messageID)
           message.update(event.data.sessionID, (draft) => {

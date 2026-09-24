@@ -357,6 +357,7 @@ const layer = Layer.effectDiscard(
         yield* run(db, event)
       }),
     )
+    yield* events.project(SessionEvent.TurnFailed, (event) => run(db, event))
     yield* events.project(SessionEvent.TitleChanged, (event) =>
       db
         .update(SessionTable)

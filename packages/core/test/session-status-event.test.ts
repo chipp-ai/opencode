@@ -70,8 +70,17 @@ const client = Layer.succeed(
   }),
 )
 const model = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route })
+// Reproduces a Session whose selected model the catalog rejects, failing the turn before any assistant step.
+let modelUnavailable = false
 const models = SessionRunnerModel.layerWith(() =>
-  Effect.succeed({ model, info: ModelV2.Info.empty(ProviderV2.ID.make("fake"), ModelV2.ID.make("fake-model")) }),
+  modelUnavailable
+    ? Effect.fail(
+        new SessionRunnerModel.ModelUnavailableError({
+          providerID: ProviderV2.ID.make("openrouter"),
+          modelID: ModelV2.ID.make("~z-ai/glm-flash-latest"),
+        }),
+      )
+    : Effect.succeed({ model, info: ModelV2.Info.empty(ProviderV2.ID.make("fake"), ModelV2.ID.make("fake-model")) }),
 )
 const permission = Layer.succeed(
   PermissionV2.Service,
@@ -160,6 +169,7 @@ const setup = Effect.gen(function* () {
   toolGate = undefined
   streamDelay = Duration.zero
   streamFailure = undefined
+  modelUnavailable = false
   const database = yield* Database.Service
   yield* database.db
     .insert(ProjectTable)
@@ -202,6 +212,8 @@ const recordTimeline = Effect.gen(function* () {
         timeline.push(`status:${event.data.status}`)
       if (event.type === SessionEvent.Step.Started.type) timeline.push("step.started")
       if (event.type === SessionEvent.Step.Ended.type) timeline.push("step.ended")
+      if (event.type === SessionEvent.Step.Failed.type) timeline.push("step.failed")
+      if (event.type === SessionEvent.TurnFailed.type) timeline.push("turn.failed")
     }),
   )
   yield* Effect.addFinalizer(() => unsubscribe)
@@ -282,6 +294,100 @@ describe("SessionExecutionLocal status events", () => {
       expect(rows).toHaveLength(0)
       expect(SessionEvent.DurableDefinitions).not.toContain(SessionEvent.StatusChanged)
       expect(SessionEvent.Definitions).toContain(SessionEvent.StatusChanged)
+    }),
+  )
+})
+
+describe("SessionRunner turn failures", () => {
+  it.live("records a turn that fails before any assistant step, then settles idle", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const timeline = yield* recordTimeline
+      const events = yield* EventV2.Service
+      const live = yield* events
+        .subscribe(SessionEvent.TurnFailed)
+        .pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
+      yield* Effect.yieldNow
+      modelUnavailable = true
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Hello?" }), resume: false })
+
+      const error = yield* session.resume(sessionID).pipe(Effect.flip)
+
+      expect(error).toBeInstanceOf(SessionRunnerModel.ModelUnavailableError)
+      expect(requests).toHaveLength(0)
+      // `resume` returns only after onIdle, so a failed start never leaves the Session reported busy.
+      expect(timeline).toEqual(["status:busy", "turn.failed", "status:idle"])
+      expect(Array.from(yield* session.active)).toEqual([])
+      const [event] = Array.from(yield* Fiber.join(live))
+      expect(event?.data.error).toEqual({
+        type: "unknown",
+        message: "Model unavailable: openrouter/~z-ai/glm-flash-latest",
+      })
+      expect(event?.durable?.aggregateID).toBe(sessionID)
+      // Durable: the failure is projected after the prompt it answered, so it survives reload.
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", text: "Hello?" },
+        { type: "turn-failed", error: { message: "Model unavailable: openrouter/~z-ai/glm-flash-latest" } },
+      ])
+    }),
+  )
+
+  it.live("records a failed start reached through an advisory wake", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const timeline = yield* recordTimeline
+      const execution = yield* SessionExecution.Service
+      modelUnavailable = true
+
+      // The default prompt path: admit, then wake without awaiting the drain.
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Hello?" }) })
+      yield* execution.join(sessionID).pipe(Effect.exit)
+
+      expect(timeline).toEqual(["status:busy", "turn.failed", "status:idle"])
+      expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual(["user", "turn-failed"])
+
+      // The failure marker is never replayed to the model once the Session can run again.
+      modelUnavailable = false
+      responses = [textStep("Back")]
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Try again" }), resume: false })
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(1)
+      expect(requests[0]!.messages.map((message) => message.role)).toEqual(["user", "user"])
+    }),
+  )
+
+  it.live("publishes no turn failure for a successful turn", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const timeline = yield* recordTimeline
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Hi" }), resume: false })
+      responses = [textStep("Hello")]
+
+      yield* session.resume(sessionID)
+
+      expect(timeline).toEqual(["status:busy", "step.started", "step.ended", "status:idle"])
+      expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual(["user", "assistant"])
+    }),
+  )
+
+  it.live("leaves a provider failure on its assistant step without a separate turn failure", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const timeline = yield* recordTimeline
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Hi" }), resume: false })
+      streamFailure = new LLMError({
+        module: "test",
+        method: "stream",
+        reason: new TransportReason({ message: "Provider unavailable" }),
+      })
+
+      expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBe(streamFailure)
+
+      expect(timeline).toEqual(["status:busy", "step.started", "step.failed", "status:idle"])
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user" },
+        { type: "assistant", error: { message: "Provider unavailable" } },
+      ])
     }),
   )
 })

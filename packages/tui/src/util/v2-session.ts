@@ -121,9 +121,9 @@ export function toV1Question(request: QuestionV2Request): QuestionRequest {
  * Project a V2 transcript into the V1 message/part shapes the existing session renderers consume.
  * `messages` is newest-first, matching both `context/data.tsx` and the V2 messages endpoint. `agent`
  * and `model` seed the selection for user messages that precede any recorded switch or step.
- * Switches have no V1 shape, so they are returned separately, keyed by the id of the entry they follow
- * ("" before the first entry). Anchoring to the preceding entry keeps a marker in place when the
- * continuation that follows it arrives.
+ * Switches and turn failures have no V1 shape, so they are returned separately as markers, keyed by the
+ * id of the entry they follow ("" before the first entry). Anchoring to the preceding entry keeps a
+ * marker in place when the continuation that follows it arrives.
  */
 export function toV1Transcript(input: {
   sessionID: string
@@ -137,14 +137,14 @@ export function toV1Transcript(input: {
     model: input.model,
     parentID: "",
   }
-  const switches: Record<string, V2Switch[]> = {}
-  // Id of the most recent projected entry, which the next switch marker renders after.
+  const markers: Record<string, V2Marker[]> = {}
+  // Id of the most recent projected entry, which the next marker renders after.
   const anchor = { id: "" }
   const entries = input.messages.toReversed().flatMap((message): { info: Message; parts: Part[] }[] => {
-    if (message.type === "agent-switched" || message.type === "model-switched") {
+    if (message.type === "agent-switched" || message.type === "model-switched" || message.type === "turn-failed") {
       if (message.type === "agent-switched") selection.agent = message.agent
       if (message.type === "model-switched") selection.model = message.model
-      ;(switches[anchor.id] ??= []).push(message)
+      ;(markers[anchor.id] ??= []).push(message)
       return []
     }
     if (message.type === "assistant") {
@@ -210,11 +210,13 @@ export function toV1Transcript(input: {
   return {
     messages: entries.map((entry) => entry.info),
     parts: Object.fromEntries(entries.map((entry) => [entry.info.id, entry.parts])),
-    switches,
+    markers,
   }
 }
 
 export type V2Switch = Extract<SessionMessage, { type: "model-switched" | "agent-switched" }>
+export type V2TurnFailed = Extract<SessionMessage, { type: "turn-failed" }>
+export type V2Marker = V2Switch | V2TurnFailed
 
 /** Transcript and toast text for a durable agent/model switch, using the provider catalog's display name. */
 export function switchLabel(item: V2Switch, providers: Provider[] | ReadonlyMap<string, Provider> | undefined) {
@@ -225,10 +227,10 @@ export function switchLabel(item: V2Switch, providers: Provider[] | ReadonlyMap<
 type SwitchObservation = { sessionID: string; id?: string; created?: number }
 
 /**
- * Whether the newest switch just happened, rather than being history the TUI loaded. `previous` is
- * undefined while V2 history is still loading; a switch first seen then only counts as live if it was
- * created after the TUI opened the Session (`openedAt`), because a fallback on a new Session's first
- * turn can land before its history finishes loading. Afterwards, any new switch id is live.
+ * Whether the newest switch (or turn failure) just happened, rather than being history the TUI loaded.
+ * `previous` is undefined while V2 history is still loading; one first seen then only counts as live if
+ * it was created after the TUI opened the Session (`openedAt`), because a fallback or failure on a new
+ * Session's first turn can land before its history finishes loading. Afterwards, any new id is live.
  */
 export function liveSwitch(
   previous: SwitchObservation | undefined,

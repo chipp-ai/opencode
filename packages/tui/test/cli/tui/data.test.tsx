@@ -936,3 +936,60 @@ test("tracks pushed V2 session status and seeds it only for sessions without a p
     app.renderer.destroy()
   }
 })
+
+test("records a live V2 turn failure as a transcript message", async () => {
+  const events = createEventSource()
+  const calls = createFetch(undefined, events)
+  let data!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    data = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+        <ProjectProvider>
+          <TestData>
+            <Probe />
+          </TestData>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  const failed: Event = {
+    id: "evt_turn_failed_1",
+    type: "session.next.turn.failed",
+    properties: {
+      sessionID: "session-1",
+      messageID: "msg_turn_failed_1",
+      timestamp: 5,
+      error: { type: "unknown", message: "Model unavailable: openrouter/~z-ai/glm-flash-latest" },
+    },
+  }
+
+  try {
+    await mounted
+    emitEvent(events, failed)
+    await wait(() => data.session.message.list("session-1")?.length === 1)
+    expect(data.session.message.list("session-1")?.[0]).toEqual({
+      id: "msg_turn_failed_1",
+      type: "turn-failed",
+      error: { type: "unknown", message: "Model unavailable: openrouter/~z-ai/glm-flash-latest" },
+      time: { created: 5 },
+    })
+    // A redelivered event does not duplicate the marker.
+    emitEvent(events, failed)
+    await Bun.sleep(20)
+    expect(data.session.message.list("session-1")?.length).toBe(1)
+  } finally {
+    app.renderer.destroy()
+  }
+})

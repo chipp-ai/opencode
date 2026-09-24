@@ -963,6 +963,13 @@ export type SessionsContextOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }
+        readonly type: "turn-failed"
+        readonly error: { readonly type: "unknown"; readonly message: string }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly time: { readonly created: number }
         readonly text: string
         readonly files?: ReadonlyArray<{
           readonly uri: string
@@ -1140,6 +1147,19 @@ export type SessionsHistoryOutput = {
     | {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "session.next.turn.failed"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly timestamp: number
+          readonly sessionID: string
+          readonly messageID: string
+          readonly error: { readonly type: "unknown"; readonly message: string }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.title.changed"
         readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1304,6 +1324,13 @@ export type SessionsHistoryOutput = {
                 readonly time: { readonly created: number }
                 readonly type: "model-switched"
                 readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+              }
+            | {
+                readonly id: string
+                readonly metadata?: { readonly [x: string]: JsonValue }
+                readonly time: { readonly created: number }
+                readonly type: "turn-failed"
+                readonly error: { readonly type: "unknown"; readonly message: string }
               }
             | {
                 readonly id: string
@@ -1837,6 +1864,19 @@ export type SessionsEventsOutput =
   | {
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "session.next.turn.failed"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly timestamp: number
+        readonly sessionID: string
+        readonly messageID: string
+        readonly error: { readonly type: "unknown"; readonly message: string }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.title.changed"
       readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2001,6 +2041,13 @@ export type SessionsEventsOutput =
               readonly time: { readonly created: number }
               readonly type: "model-switched"
               readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+            }
+          | {
+              readonly id: string
+              readonly metadata?: { readonly [x: string]: unknown }
+              readonly time: { readonly created: number }
+              readonly type: "turn-failed"
+              readonly error: { readonly type: "unknown"; readonly message: string }
             }
           | {
               readonly id: string
@@ -2525,6 +2572,13 @@ export type SessionsMessageOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }
+        readonly type: "turn-failed"
+        readonly error: { readonly type: "unknown"; readonly message: string }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly time: { readonly created: number }
         readonly text: string
         readonly files?: ReadonlyArray<{
           readonly uri: string
@@ -2698,6 +2752,13 @@ export type MessagesListOutput = {
         readonly time: { readonly created: number }
         readonly type: "model-switched"
         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly time: { readonly created: number }
+        readonly type: "turn-failed"
+        readonly error: { readonly type: "unknown"; readonly message: string }
       }
     | {
         readonly id: string
