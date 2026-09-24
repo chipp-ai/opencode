@@ -10,6 +10,7 @@ import {
   toV1Transcript,
   toV2Prompt,
   V2_UNAVAILABLE_COMMANDS,
+  v2ContextUsage,
   v2SwitchPlan,
   type V2Switch,
 } from "../../src/util/v2-session"
@@ -32,9 +33,10 @@ describe("isV2Session", () => {
 
 describe("V2_UNAVAILABLE_COMMANDS", () => {
   test("covers the V1-only session commands", () => {
-    expect(V2_UNAVAILABLE_COMMANDS.has("session.compact")).toBe(true)
-    // Sharing and forking have V2 paths (v2.session.share/unshare/fork), so they are no longer gated.
-    for (const command of ["session.rename", "session.share", "session.unshare", "session.fork"])
+    for (const command of ["session.timeline", "session.undo", "session.redo"])
+      expect(V2_UNAVAILABLE_COMMANDS.has(command)).toBe(true)
+    // These have V2 paths (v2.session.share/unshare/fork/compact), so they are no longer gated.
+    for (const command of ["session.rename", "session.share", "session.unshare", "session.fork", "session.compact"])
       expect(V2_UNAVAILABLE_COMMANDS.has(command)).toBe(false)
   })
 })
@@ -333,6 +335,71 @@ describe("toV1Transcript", () => {
     })
     const assistant = failed.messages[0]
     expect(assistant.role === "assistant" && assistant.error).toEqual({ name: "UnknownError", data: { message: "boom" } })
+  })
+
+  test("renders a user shell command as a bash tool call, running until it ends", () => {
+    const shell = (completed?: number) =>
+      toV1Transcript({
+        sessionID: "ses_1",
+        directory: "/repo",
+        agent: "build",
+        model,
+        messages: [
+          {
+            id: "msg_sh",
+            type: "shell",
+            callID: "call_sh",
+            command: "echo hi",
+            output: completed === undefined ? "" : "hi\n",
+            time: { created: 2, completed },
+          },
+          { id: "msg_u", type: "user", text: "first", time: { created: 1 } },
+        ],
+      })
+
+    const running = shell()
+    expect(running.messages.map((message) => [message.id, message.role])).toEqual([
+      ["msg_u", "user"],
+      ["msg_sh", "assistant"],
+    ])
+    const info = running.messages[1]
+    expect(info.role === "assistant" && info.parentID).toBe("msg_u")
+    expect(info.role === "assistant" && info.agent).toBe("build")
+    const part = running.parts.msg_sh[0]
+    expect(part.type === "tool" && part.tool).toBe("bash")
+    expect(part.type === "tool" && part.state.status).toBe("running")
+    expect(part.type === "tool" && part.state.input).toEqual({ command: "echo hi" })
+
+    const done = shell(3).parts.msg_sh[0]
+    expect(done.type === "tool" && done.state.status === "completed" && done.state.metadata?.output).toBe("hi\n")
+    expect(done.type === "tool" && done.state.status === "completed" && done.state.time).toEqual({ start: 2, end: 3 })
+  })
+})
+
+describe("v2ContextUsage", () => {
+  const assistant = (id: string, output: number, created: number) =>
+    ({
+      id,
+      type: "assistant",
+      agent: "build",
+      model,
+      time: { created, completed: created + 1 },
+      content: [],
+      tokens: { input: 100, output, reasoning: 5, cache: { read: 10, write: 1 } },
+    }) satisfies SessionMessage
+
+  test("is undefined before any step produced output", () => {
+    expect(v2ContextUsage([])).toBeUndefined()
+    expect(v2ContextUsage([assistant("msg_a", 0, 1)])).toBeUndefined()
+  })
+
+  test("sums the newest step with output and names its model", () => {
+    // Newest-first: an in-flight step with no output yet is skipped in favor of the last finished one.
+    expect(v2ContextUsage([assistant("msg_b", 0, 3), assistant("msg_a", 20, 1)])).toEqual({
+      tokens: 136,
+      providerID: "anthropic",
+      modelID: "claude",
+    })
   })
 })
 

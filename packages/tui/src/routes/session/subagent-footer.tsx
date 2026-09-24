@@ -1,17 +1,31 @@
-import { createMemo, createSignal, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, Show } from "solid-js"
 import { useRouteData } from "../../context/route"
 import { useSync } from "../../context/sync"
+import { useData } from "../../context/data"
 import { useTheme } from "../../context/theme"
 import { SplitBorder } from "../../ui/border"
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, Message } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { subtreeCost } from "../../util/session-subtree"
+import { v2ContextUsage } from "../../util/v2-session"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
+
+function v1ContextUsage(messages: Message[]) {
+  const last = messages.findLast(
+    (item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0,
+  )
+  if (!last) return
+  const tokens =
+    last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+  if (tokens <= 0) return
+  return { tokens, providerID: last.providerID, modelID: last.modelID }
+}
 
 export function SubagentFooter() {
   const route = useRouteData("session")
   const sync = useSync()
+  const data = useData()
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   const session = createMemo(() => sync.session.get(route.sessionID))
 
@@ -31,19 +45,22 @@ export function SubagentFooter() {
     return { label, index: index + 1, total: siblings.length }
   })
 
+  // V2 subagent sessions have no legacy messages; their usage lives on the V2 transcript and rollup instead.
+  const v2 = createMemo(() => messages().length === 0 && (data.session.message.list(route.sessionID)?.length ?? 0) > 0)
+  createEffect(() => {
+    if (!v2()) return
+    void data.session.cost.refresh(route.sessionID).catch(() => {})
+  })
+
   const usage = createMemo(() => {
-    const msg = messages()
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    const last = v2() ? v2ContextUsage(data.session.message.list(route.sessionID)) : v1ContextUsage(messages())
     if (!last) return
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
-    if (tokens <= 0) return
-
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+    const pct = model?.limit.context ? `${Math.round((last.tokens / model.limit.context) * 100)}%` : undefined
+    const rollup = data.session.cost.get(route.sessionID)
     const subtree = subtreeCost(sync.data.session, route.sessionID)
-    const cost = subtree.self + subtree.subagents
+    const cost = v2() ? (rollup?.cost ?? 0) + (rollup?.subagents.cost ?? 0) : subtree.self + subtree.subagents
 
     const money = new Intl.NumberFormat("en-US", {
       style: "currency",
@@ -51,7 +68,7 @@ export function SubagentFooter() {
     })
 
     return {
-      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+      context: pct ? `${Locale.number(last.tokens)} (${pct})` : Locale.number(last.tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })

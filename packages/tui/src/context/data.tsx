@@ -15,6 +15,7 @@ import type {
   SessionMessageAssistantText,
   SessionMessageAssistantTool,
   SessionInputAdmitted,
+  SessionRollup,
   SessionV2Info,
   SkillV2Info,
   V2Event,
@@ -23,6 +24,7 @@ import { createStore, produce } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import { useSDK } from "./sdk"
 import { useEvent } from "./event"
+import { usePermission } from "./permission"
 import { createSignal, onCleanup, onMount } from "solid-js"
 
 type LocationData = {
@@ -38,7 +40,10 @@ type LocationData = {
 type Data = {
   session: {
     info: Record<string, SessionV2Info>
+    cost: Record<string, SessionRollup>
     message: Record<string, SessionMessage[]>
+    /** Cursor for the next older page of `message`, when one may exist. */
+    older: Record<string, string | undefined>
     input: Record<string, SessionInputAdmitted[]>
     permission: Record<string, PermissionV2Request[]>
     question: Record<string, QuestionV2Request[]>
@@ -53,6 +58,13 @@ function locationKey(location: LocationRef) {
   return JSON.stringify([location.directory, location.workspaceID])
 }
 
+const MESSAGE_PAGE = 200
+
+// The endpoint returns a `next` cursor for any non-empty page, so a short page is the only end-of-history signal.
+function olderCursor(page: { data: unknown[]; cursor: { next?: string } }) {
+  return page.data.length < MESSAGE_PAGE ? undefined : page.cursor.next
+}
+
 function locationQuery(ref?: LocationRef) {
   return ref ? { directory: ref.directory, workspace: ref.workspaceID } : undefined
 }
@@ -63,7 +75,9 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
     const [store, setStore] = createStore<Data>({
       session: {
         info: {},
+        cost: {},
         message: {},
+        older: {},
         input: {},
         permission: {},
         question: {},
@@ -76,6 +90,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
 
     const sdk = useSDK()
     const events = useEvent()
+    const permissionMode = usePermission()
     const [defaultLocation, setDefaultLocation] = createSignal<LocationRef>({
       directory: sdk.directory ?? process.cwd(),
     })
@@ -288,6 +303,10 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           break
         case "session.next.step.ended":
           resyncMissingAssistant(event.data.sessionID, event.data.assistantMessageID)
+          // A step in any session may belong to a tracked session's subagent tree, and the event does not say
+          // which, so reload every rollup being displayed.
+          for (const sessionID of Object.keys(store.session.cost))
+            void result.session.cost.refresh(sessionID).catch(() => {})
           message.update(event.data.sessionID, (draft) => {
             const currentAssistant = message.assistant(draft, event.data.assistantMessageID)
             if (!currentAssistant) return
@@ -457,6 +476,13 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           })
           break
         case "permission.v2.asked":
+          // `--auto` approves every V2 request this process sees, whichever session is open, like V1's sync store.
+          if (permissionMode.mode === "auto") {
+            void sdk.client.v2.session.permission
+              .reply({ sessionID: event.data.sessionID, requestID: event.data.id, reply: "once" })
+              .catch((error) => console.error("Failed to auto-approve permission", error))
+            break
+          }
           // Subagent sessions are created server-side; load their info so parents can claim their requests.
           if (!store.session.info[event.data.sessionID]) void result.session.refresh(event.data.sessionID)
           setStore(
@@ -521,14 +547,46 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           const result = await sdk.client.v2.session.get({ sessionID }, { throwOnError: true })
           setStore("session", "info", sessionID, result.data.data)
         },
+        cost: {
+          /** The session's own spend plus its subagent tree's, once loaded; kept current as steps end. */
+          get(sessionID: string) {
+            return store.session.cost[sessionID]
+          },
+          async refresh(sessionID: string) {
+            const result = await sdk.client.v2.session.cost({ sessionID }, { throwOnError: true })
+            setStore("session", "cost", sessionID, result.data.data)
+          },
+        },
         message: {
           list(sessionID: string) {
             return store.session.message[sessionID]
           },
           async refresh(sessionID: string) {
             // Newest-first like the live bridge; 200 is the endpoint's maximum page size.
-            const result = await sdk.client.v2.session.messages({ sessionID, limit: 200 }, { throwOnError: true })
+            const result = await sdk.client.v2.session.messages(
+              { sessionID, limit: MESSAGE_PAGE },
+              { throwOnError: true },
+            )
             setStore("session", "message", sessionID, result.data.data)
+            setStore("session", "older", sessionID, olderCursor(result.data))
+          },
+          /** Whether an older page may exist beyond the loaded messages. */
+          hasOlder(sessionID: string) {
+            return store.session.older[sessionID] !== undefined
+          },
+          /** Appends the next page of older messages, keeping the list newest-first. */
+          async loadOlder(sessionID: string) {
+            const cursor = store.session.older[sessionID]
+            if (!cursor) return
+            const result = await sdk.client.v2.session.messages(
+              { sessionID, limit: MESSAGE_PAGE, cursor },
+              { throwOnError: true },
+            )
+            message.update(sessionID, (draft) => {
+              const known = new Set(draft.map((item) => item.id))
+              draft.push(...result.data.data.filter((item) => !known.has(item.id)))
+            })
+            setStore("session", "older", sessionID, olderCursor(result.data))
           },
         },
         input: {

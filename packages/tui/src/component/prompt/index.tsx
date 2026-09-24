@@ -11,7 +11,7 @@ import {
   type Renderable,
 } from "@opentui/core"
 import type { CommandContext } from "@opentui/keymap"
-import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
+import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match, untrack } from "solid-js"
 import { registerOpencodeSpinner } from "../register-spinner"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -35,6 +35,7 @@ import { promptOffsetWidth } from "../../prompt/display"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { usePromptHistory, type PromptInfo } from "../../prompt/history"
 import { computePromptTraits } from "../../prompt/traits"
+import { parseSlashCommand } from "../../prompt/command"
 import {
   expandPastedTextPlaceholders,
   expandTrackedPastedText,
@@ -46,7 +47,7 @@ import { DialogStash } from "../dialog-stash"
 import { DialogQueuedInput } from "../dialog-queued-input"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
-import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, FilePart, ModelRef, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { errorMessage } from "../../util/error"
 import { formatDuration } from "../../util/format"
@@ -68,7 +69,7 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
-import { isV2SessionBusy, toV2Prompt, v2SwitchPlan, v2UnavailableMessage } from "../../util/v2-session"
+import { isV2SessionBusy, toV2Prompt, v2ContextUsage, v2SwitchPlan } from "../../util/v2-session"
 
 registerOpencodeSpinner()
 
@@ -304,8 +305,15 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
+  // V2 sessions keep usage on their own transcript and rollup rather than the legacy sync store.
+  createEffect(() => {
+    const sessionID = props.sessionID
+    if (!sessionID || !v2()) return
+    void data.session.cost.refresh(sessionID).catch(() => {})
+  })
   const usage = createMemo(() => {
     if (!props.sessionID) return
+    if (v2()) return v2Usage(props.sessionID)
     const msg = sync.data.message[props.sessionID] ?? []
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
     if (!last) return
@@ -324,6 +332,20 @@ export function Prompt(props: PromptProps) {
       cost: cost > 0 ? `${money.format(cost)}${subagents}` : undefined,
     }
   })
+
+  function v2Usage(sessionID: string) {
+    const context = v2ContextUsage(data.session.message.list(sessionID))
+    if (!context) return
+    const model = sync.data.provider.find((item) => item.id === context.providerID)?.models[context.modelID]
+    const pct = model?.limit.context ? `${Math.round((context.tokens / model.limit.context) * 100)}%` : undefined
+    const rollup = data.session.cost.get(sessionID)
+    const cost = (rollup?.cost ?? 0) + (rollup?.subagents.cost ?? 0)
+    const subagents = rollup && rollup.subagents.cost > 0 ? ` (+${money.format(rollup.subagents.cost)} subagents)` : ""
+    return {
+      context: pct ? `${Locale.number(context.tokens)} (${pct})` : Locale.number(context.tokens),
+      cost: cost > 0 ? `${money.format(cost)}${subagents}` : undefined,
+    }
+  }
 
   const [store, setStore] = createStore<{
     prompt: PromptInfo
@@ -384,6 +406,54 @@ export function Prompt(props: PromptProps) {
       }
     }
   })
+
+  // V2 persists agent/model on the Session rather than per prompt. Switches run one at a time, and each
+  // refreshes the Session info so a queued switch plans against what the server now holds.
+  let v2SelectionSync: Promise<unknown> = Promise.resolve()
+  function syncV2Selection(sessionID: string, selected: { agent: string; model: ModelRef }) {
+    const next = v2SelectionSync.then(async () => {
+      const plan = v2SwitchPlan(data.session.get(sessionID) ?? selected, selected)
+      if (!plan.agent && !plan.model) return
+      if (plan.agent)
+        await sdk.client.v2.session.switchAgent({ sessionID, agent: plan.agent }, { throwOnError: true })
+      if (plan.model)
+        await sdk.client.v2.session.switchModel({ sessionID, model: plan.model }, { throwOnError: true })
+      await data.session.refresh(sessionID)
+    })
+    v2SelectionSync = next.catch(() => {})
+    return next
+  }
+
+  // Apply a picked agent/model to an open V2 Session immediately. Only local selection changes trigger this:
+  // a live switch from the Session (e.g. a model fallback) updates the Session info first and is then copied
+  // into the local selection by the session route, so the plan here comes out empty instead of switching back.
+  createEffect(
+    on(
+      () => {
+        const model = local.model.current()
+        return {
+          agent: local.agent.current()?.name,
+          providerID: model?.providerID,
+          modelID: model?.modelID,
+          variant: local.model.variant.current(),
+        }
+      },
+      (current) => {
+        const sessionID = props.sessionID
+        if (!sessionID || !untrack(v2) || !current.agent || !current.providerID || !current.modelID) return
+        // Wait until the Session's own selection is loaded; the initializer above then adopts it locally.
+        if (syncedSessionID !== sessionID || !untrack(() => data.session.get(sessionID))) return
+        const selected = {
+          agent: current.agent,
+          model: { providerID: current.providerID, id: current.modelID, variant: current.variant },
+        }
+        syncV2Selection(sessionID, selected).catch((error) => {
+          toast.show({ title: "Failed to switch", message: errorMessage(error), variant: "error" })
+        })
+      },
+      { defer: true },
+    ),
+  )
 
   const promptCommands = createMemo(() =>
     [
@@ -986,10 +1056,6 @@ export function Prompt(props: PromptProps) {
           desc: "Shell mode",
           group: "Prompt",
           cmd: () => {
-            if (v2()) {
-              toast.show({ message: v2UnavailableMessage("Shell mode"), variant: "warning", duration: 3000 })
-              return
-            }
             setStore("placeholder", randomIndex(shell().length))
             setStore("mode", "shell")
           },
@@ -1144,21 +1210,6 @@ export function Prompt(props: PromptProps) {
       return false
     }
 
-    // Refuse V1-only turn types before a V2 session gets created for them.
-    if (
-      v2() &&
-      (store.mode === "shell" ||
-        (trimmed.startsWith("/") &&
-          sync.data.command.some((x) => x.name === trimmed.split("\n")[0].split(" ")[0].slice(1))))
-    ) {
-      toast.show({
-        message: v2UnavailableMessage(store.mode === "shell" ? "Shell mode" : "Custom slash commands"),
-        variant: "warning",
-        duration: 3000,
-      })
-      return false
-    }
-
     const variant = local.model.variant.current()
     let sessionID = props.sessionID
     let finishMoveProgress = false
@@ -1231,6 +1282,8 @@ export function Prompt(props: PromptProps) {
           ]
         : []
 
+    const command = currentMode === "normal" ? parseSlashCommand(inputText, sync.data.command) : undefined
+
     if (v2()) {
       move.startSubmit()
       const target = sessionID
@@ -1238,31 +1291,36 @@ export function Prompt(props: PromptProps) {
         agent: agent.name,
         model: { providerID: selectedModel.providerID, id: selectedModel.modelID, variant },
       }
-      // V2 persists agent/model on the Session instead of taking them per prompt, so sync any local
-      // change (agent cycle, /model) before admitting the prompt. New sessions were created with them.
-      const plan = v2SwitchPlan(data.session.get(target) ?? selected, selected)
-      // Sequential so the transcript records switches in a stable order; a failed switch skips the prompt.
-      void Promise.resolve(
-        plan.agent && sdk.client.v2.session.switchAgent({ sessionID: target, agent: plan.agent }, { throwOnError: true }),
-      )
-        .then(
-          () =>
-            plan.model &&
-            sdk.client.v2.session.switchModel({ sessionID: target, model: plan.model }, { throwOnError: true }),
-        )
-        .then(() =>
-          sdk.client.v2.session.prompt(
-            { sessionID: target, prompt: toV2Prompt(inputText, nonTextParts) },
+      const prompt = toV2Prompt(inputText, nonTextParts)
+      const send = (): Promise<unknown> => {
+        if (currentMode === "shell")
+          return sdk.client.v2.session.shell({ sessionID: target, command: inputText }, { throwOnError: true })
+        if (command)
+          return sdk.client.v2.session.command(
+            {
+              sessionID: target,
+              command: command.name,
+              arguments: command.arguments,
+              agent: selected.agent,
+              model: selected.model,
+              files: prompt.files,
+            },
             { throwOnError: true },
-          ),
-        )
+          )
+        return sdk.client.v2.session.prompt({ sessionID: target, prompt }, { throwOnError: true })
+      }
+      // Agent/model changes are applied to the Session as soon as they are picked (see syncV2Selection); this
+      // catches anything that failed or raced there. New sessions were created with the current selection.
+      void syncV2Selection(target, selected)
+        .then(send)
         .catch((error) => {
           toast.show({
-            title: "Failed to send prompt",
+            title: currentMode === "shell" ? "Shell command failed" : command ? "Command failed" : "Failed to send prompt",
             message: errorMessage(error),
             variant: "error",
           })
         })
+      if (currentMode === "shell") setStore("mode", "normal")
     } else if (store.mode === "shell") {
       move.startSubmit()
       void sdk.client.session.shell({
@@ -1275,22 +1333,12 @@ export function Prompt(props: PromptProps) {
         command: inputText,
       })
       setStore("mode", "normal")
-    } else if (
-      inputText.startsWith("/") &&
-      sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))
-    ) {
+    } else if (command) {
       move.startSubmit()
-      // Parse command from first line, preserve multi-line content in arguments
-      const firstLineEnd = inputText.indexOf("\n")
-      const firstLine = firstLineEnd === -1 ? inputText : inputText.slice(0, firstLineEnd)
-      const [command, ...firstLineArgs] = firstLine.split(" ")
-      const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
-      const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
-
       void sdk.client.session.command({
         sessionID,
-        command: command.slice(1),
-        arguments: args,
+        command: command.name,
+        arguments: command.arguments,
         agent: agent.name,
         model: `${selectedModel.providerID}/${selectedModel.modelID}`,
         variant,

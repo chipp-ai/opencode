@@ -21,7 +21,7 @@ import { Locale } from "./locale"
 import { name } from "./model"
 
 /** Session palette commands that depend on V1-only endpoints or V1 message data, with no V2 path in the TUI yet. */
-export const V2_UNAVAILABLE_COMMANDS = new Set(["session.timeline", "session.compact", "session.undo", "session.redo"])
+export const V2_UNAVAILABLE_COMMANDS = new Set(["session.timeline", "session.undo", "session.redo"])
 
 export function v2UnavailableMessage(feature: string) {
   return `${feature} is not available in V2 mode yet`
@@ -66,6 +66,21 @@ export function isV2SessionBusy(messages: SessionMessage[] = []) {
   if (!latest) return false
   if (latest.type === "user") return true
   return !latest.time.completed
+}
+
+/**
+ * Context-window usage from the newest finished step that produced output, which is what the provider last
+ * saw. `messages` is newest-first.
+ */
+export function v2ContextUsage(messages: SessionMessage[] = []) {
+  const last = messages.find(
+    (message): message is SessionMessageAssistant => message.type === "assistant" && (message.tokens?.output ?? 0) > 0,
+  )
+  if (!last?.tokens) return
+  const tokens =
+    last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+  if (tokens <= 0) return
+  return { tokens, providerID: last.model.providerID, modelID: last.model.id }
 }
 
 export function toV2Prompt(text: string, parts: PromptInfo["parts"]): PromptInput {
@@ -198,7 +213,11 @@ export function toV1Transcript(input: {
         },
       ]
     }
-    // System context, synthetic reminders, and shell turns have no V1 transcript representation.
+    if (message.type === "shell") {
+      anchor.id = message.id
+      return [shellEntry(input, message, selection)]
+    }
+    // System context and synthetic reminders have no V1 transcript representation.
     return []
   })
   return {
@@ -296,6 +315,46 @@ function assistantEntry(
     }
   })
   return { info, parts }
+}
+
+// V2 records a user-typed shell command as its own message; the shared renderers show it the way V1 does,
+// as an assistant turn holding a single bash tool call.
+function shellEntry(
+  input: { sessionID: string; directory: string },
+  message: Extract<SessionMessage, { type: "shell" }>,
+  selection: { agent: string; model?: ModelRef; parentID: string },
+) {
+  const base = { sessionID: input.sessionID, messageID: message.id }
+  const info: Message = {
+    id: message.id,
+    sessionID: input.sessionID,
+    role: "assistant",
+    time: { created: message.time.created, completed: message.time.completed },
+    parentID: selection.parentID,
+    modelID: selection.model?.id ?? "",
+    providerID: selection.model?.providerID ?? "",
+    mode: selection.agent,
+    agent: selection.agent,
+    path: { cwd: input.directory, root: input.directory },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const shared = { ...base, id: `${message.id}-shell`, type: "tool" as const, callID: message.callID, tool: "bash" }
+  const state = { input: { command: message.command }, metadata: { output: message.output } }
+  const part: ToolPart =
+    message.time.completed === undefined
+      ? { ...shared, state: { status: "running", ...state, time: { start: message.time.created } } }
+      : {
+          ...shared,
+          state: {
+            status: "completed",
+            ...state,
+            output: message.output,
+            title: message.command,
+            time: { start: message.time.created, end: message.time.completed },
+          },
+        }
+  return { info, parts: [part] }
 }
 
 function toolPart(base: { sessionID: string; messageID: string }, tool: SessionMessageAssistantTool): ToolPart {

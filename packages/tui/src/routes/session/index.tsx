@@ -20,7 +20,6 @@ import { useRoute, useRouteData } from "../../context/route"
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
 import { useData } from "../../context/data"
-import { usePermission } from "../../context/permission"
 import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
@@ -275,6 +274,18 @@ export function Session() {
     setV2Transcript("parts", reconcile(transcript.parts))
     setV2Transcript("switches", reconcile(transcript.switches))
   })
+  const [loadingOlder, setLoadingOlder] = createSignal(false)
+  function loadOlderMessages() {
+    if (loadingOlder()) return
+    const sessionID = route.sessionID
+    setLoadingOlder(true)
+    void data.session.message
+      .loadOlder(sessionID)
+      .catch((error) => {
+        toast.show({ title: "Failed to load earlier messages", message: errorMessage(error), variant: "error" })
+      })
+      .finally(() => setLoadingOlder(false))
+  }
   const switchesAfter = (id: string) => (v2() ? v2Transcript.switches[id] : undefined) ?? []
   const messages = createMemo(() => (v2() ? v2Transcript.messages : (sync.data.message[route.sessionID] ?? [])))
   const partsFor = (messageID: string) => (v2() ? v2Transcript.parts[messageID] : sync.data.part[messageID]) ?? []
@@ -352,18 +363,6 @@ export function Session() {
   const toast = useToast()
   const sdk = useSDK()
   const editor = useEditorContext()
-
-  // Mirrors the legacy sync store's `--auto` approval, which only sees V1 permission events.
-  const permissionMode = usePermission()
-  const autoApproved = new Set<string>()
-  createEffect(() => {
-    if (!v2() || permissionMode.mode !== "auto") return
-    for (const request of permissions()) {
-      if (autoApproved.has(request.id)) continue
-      autoApproved.add(request.id)
-      void sdk.client.v2.session.permission.reply({ sessionID: request.sessionID, requestID: request.id, reply: "once" })
-    }
-  })
 
   createEffect(() => {
     const sessionID = route.sessionID
@@ -728,6 +727,16 @@ export function Session() {
       },
     },
     {
+      title: "Load earlier messages",
+      value: "session.messages.older",
+      category: "Session",
+      enabled: v2() && data.session.message.hasOlder(route.sessionID),
+      run: () => {
+        dialog.clear()
+        loadOlderMessages()
+      },
+    },
+    {
       title: "Fork session",
       value: "session.fork",
       category: "Session",
@@ -768,6 +777,31 @@ export function Session() {
             message: "Connect a provider to summarize this session",
             duration: 3000,
           })
+          return
+        }
+        if (v2()) {
+          const sessionID = route.sessionID
+          const latest = () =>
+            data.session.message.list(sessionID)?.find((message) => message.type === "compaction")?.id
+          const before = latest()
+          toast.show({ message: "Compacting session…", variant: "info", duration: 3000 })
+          // V2 compaction runs inside the request and returns without an event when the history is too
+          // short to summarize, so reload the transcript to tell the user which one happened.
+          void sdk.client.v2.session
+            .compact({ sessionID }, { throwOnError: true })
+            .then(() => data.session.message.refresh(sessionID))
+            .then(() => {
+              if (latest() === before) {
+                toast.show({ message: "Nothing to compact yet", variant: "info", duration: 3000 })
+                return
+              }
+              toast.show({ message: "Session compacted", variant: "success", duration: 3000 })
+              toBottom()
+            })
+            .catch((error) => {
+              toast.show({ title: "Failed to compact session", message: errorMessage(error), variant: "error" })
+            })
+          dialog.clear()
           return
         }
         void sdk.client.session.summarize({
@@ -1407,6 +1441,13 @@ export function Session() {
                 scrollAcceleration={scrollAcceleration()}
               >
                 <box height={1} />
+                <Show when={v2() && data.session.message.hasOlder(route.sessionID)}>
+                  <box paddingLeft={3} flexShrink={0} onMouseUp={loadOlderMessages}>
+                    <text fg={theme.textMuted}>
+                      {loadingOlder() ? "Loading earlier messages…" : "↑ Load earlier messages"}
+                    </text>
+                  </box>
+                </Show>
                 <For each={switchesAfter("")}>{(item) => <SwitchMarker item={item} />}</For>
                 <For each={messages()}>
                   {(message, index) => (

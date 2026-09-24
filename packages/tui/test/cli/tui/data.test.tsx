@@ -2,12 +2,24 @@
 import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
 import type { Event, GlobalEvent } from "@opencode-ai/sdk/v2"
-import { onMount } from "solid-js"
+import { onMount, type ParentProps } from "solid-js"
+import { ArgsProvider } from "../../../src/context/args"
+import { PermissionProvider } from "../../../src/context/permission"
 import { ProjectProvider } from "../../../src/context/project"
 import { SDKProvider } from "../../../src/context/sdk"
 import { DataProvider, useData } from "../../../src/context/data"
 import { createEventSource, createFetch, directory, json } from "../../fixture/tui-sdk"
 import { TestTuiContexts } from "../../fixture/tui-environment"
+
+function TestData(props: ParentProps<{ auto?: boolean }>) {
+  return (
+    <ArgsProvider auto={props.auto}>
+      <PermissionProvider>
+        <DataProvider>{props.children}</DataProvider>
+      </PermissionProvider>
+    </ArgsProvider>
+  )
+}
 
 async function wait(fn: () => boolean, timeout = 2000) {
   const start = Date.now()
@@ -67,9 +79,9 @@ test("refreshes resources into reactive getters", async () => {
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -136,9 +148,9 @@ test("refreshes integrations after integration updates", async () => {
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -177,9 +189,9 @@ test("refreshes effective catalog data after catalog updates", async () => {
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <box />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -222,9 +234,9 @@ test("refreshes references after updates", async () => {
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -260,9 +272,9 @@ test("settles pending tools when a live failure arrives", async () => {
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -389,9 +401,9 @@ test("renders admitted prompts only after they become model-visible", async () =
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -453,9 +465,9 @@ test("projects live context updates with their message ID", async () => {
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -504,9 +516,9 @@ test("tracks pending inputs from admission until promotion, withdrawal, or revis
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -607,9 +619,9 @@ test("withdraws and revises pending inputs through the v2 input routes", async (
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -672,9 +684,9 @@ test("tracks V2 permission and question requests and switch-driven session selec
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
         <ProjectProvider>
-          <DataProvider>
+          <TestData>
             <Probe />
-          </DataProvider>
+          </TestData>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -731,6 +743,121 @@ test("tracks V2 permission and question requests and switch-driven session selec
     } as Event)
     await wait(() => data.session.permission.tree("ses_parent").length === 0)
     expect(data.session.question.tree("ses_parent")).toEqual([])
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("auto-approves V2 permission requests for any session under --auto", async () => {
+  const events = createEventSource()
+  const replies: string[] = []
+  const calls = createFetch((url) => {
+    if (!url.pathname.endsWith("/reply")) return undefined
+    replies.push(url.pathname)
+    return new Response(null, { status: 204 })
+  }, events)
+  let data!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    data = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+        <ProjectProvider>
+          <TestData auto>
+            <Probe />
+          </TestData>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await mounted
+    // No session route is mounted, so approval cannot depend on which session is open.
+    for (const [id, sessionID] of [
+      ["per_1", "ses_a"],
+      ["per_2", "ses_b"],
+    ])
+      emitEvent(events, {
+        id: `evt_${id}`,
+        type: "permission.v2.asked",
+        properties: { id, sessionID, action: "bash", resources: ["ls"] },
+      } as Event)
+    await wait(() => replies.length === 2)
+    expect(replies.toSorted()).toEqual([
+      "/api/session/ses_a/permission/per_1/reply",
+      "/api/session/ses_b/permission/per_2/reply",
+    ])
+    // Approved requests never become pending prompts.
+    expect(data.session.permission.list("ses_a")).toBeUndefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("pages older V2 messages until a short page ends the history", async () => {
+  const events = createEventSource()
+  // 250 messages, newest first; the endpoint pages 200 at a time.
+  const all = Array.from({ length: 250 }, (_, index) => ({
+    id: `msg_${String(250 - index).padStart(3, "0")}`,
+    type: "user" as const,
+    text: `m${250 - index}`,
+    time: { created: 250 - index },
+  }))
+  const cursors: (string | null)[] = []
+  const calls = createFetch((url) => {
+    if (url.pathname !== "/api/session/ses_page/message") return undefined
+    const cursor = url.searchParams.get("cursor")
+    cursors.push(cursor)
+    const page = cursor === "c1" ? all.slice(200) : all.slice(0, 200)
+    return json({ data: page, cursor: { next: cursor === "c1" ? "c2" : "c1" } })
+  }, events)
+  let data!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    data = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+        <ProjectProvider>
+          <TestData>
+            <Probe />
+          </TestData>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await mounted
+    await data.session.message.refresh("ses_page")
+    expect(data.session.message.list("ses_page")?.length).toBe(200)
+    expect(data.session.message.hasOlder("ses_page")).toBe(true)
+
+    await data.session.message.loadOlder("ses_page")
+    const ids = data.session.message.list("ses_page")?.map((message) => message.id) ?? []
+    expect(ids).toEqual(all.map((message) => message.id))
+    // The short second page is the end of history, so no further request is made.
+    expect(data.session.message.hasOlder("ses_page")).toBe(false)
+    await data.session.message.loadOlder("ses_page")
+    expect(cursors).toEqual([null, "c1"])
   } finally {
     app.renderer.destroy()
   }
