@@ -69,7 +69,7 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
-import { isV2SessionBusy, toV2Prompt, v2ContextUsage, v2SwitchPlan } from "../../util/v2-session"
+import { toV2Prompt, v2ContextUsage, v2SwitchPlan } from "../../util/v2-session"
 
 registerOpencodeSpinner()
 
@@ -181,26 +181,8 @@ export function Prompt(props: PromptProps) {
   const v2 = createMemo(
     () => sync.data.capabilities.experimentalV2Session && (props.sessionID ? props.v2 === true : true),
   )
-  const v2TranscriptBusy = createMemo(() => v2() && isV2SessionBusy(data.session.message.list(props.sessionID ?? "")))
-  // A run that fails before its first step (e.g. no usable model) leaves the prompt as the newest
-  // message, so confirm with the process-local drain registry while the transcript looks busy.
-  const [v2Running, setV2Running] = createSignal(true)
-  createEffect(() => {
-    const sessionID = props.sessionID
-    if (!sessionID || !v2TranscriptBusy()) {
-      setV2Running(true)
-      return
-    }
-    const check = () =>
-      sdk.client.v2.session
-        .active()
-        .then((result) => setV2Running(result.data?.data[sessionID] !== undefined))
-        .catch(() => {})
-    const timer = setInterval(check, 1000)
-    onCleanup(() => clearInterval(timer))
-  })
   const status = createMemo(() => {
-    if (v2()) return v2TranscriptBusy() && v2Running() ? { type: "busy" as const } : { type: "idle" as const }
+    if (v2()) return data.session.status.get(props.sessionID ?? "")
     return sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" as const }
   })
   const history = usePromptHistory()

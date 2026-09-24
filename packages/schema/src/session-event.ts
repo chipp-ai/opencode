@@ -446,6 +446,16 @@ export const Retried = Event.define({
 })
 export type Retried = typeof Retried.Type
 
+// Execution status is live-only process state; a reconnecting client asks `session.active` instead.
+export const StatusChanged = Event.define({
+  type: "session.next.status.changed",
+  schema: {
+    ...Base,
+    status: Schema.Literals(["busy", "idle"]),
+  },
+})
+export type StatusChanged = typeof StatusChanged.Type
+
 export namespace Compaction {
   export const Started = Event.define({
     type: "session.next.compaction.started",
@@ -562,6 +572,7 @@ export const Definitions = Event.inventory(
   Tool.Success,
   Tool.Failed,
   Retried,
+  StatusChanged,
   Compaction.Started,
   Compaction.Delta,
   Compaction.Ended,

@@ -1,4 +1,6 @@
-import { Cause, Effect, Layer } from "effect"
+import { Cause, DateTime, Effect, Layer } from "effect"
+import { EventV2 } from "../../event"
+import { SessionEvent } from "../event"
 import { LocationServiceMap } from "../../location-service-map"
 import { makeGlobalNode } from "../../effect/app-node"
 import { SessionRunCoordinator } from "../run-coordinator"
@@ -13,6 +15,19 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const store = yield* SessionStore.Service
     const locations = yield* LocationServiceMap.Service
+    const events = yield* EventV2.Service
+    const publishStatus = Effect.fnUntraced(function* (
+      sessionID: SessionSchema.ID,
+      status: SessionEvent.StatusChanged["data"]["status"],
+    ) {
+      // Hooks run outside any Location scope, so route the event to the Session's own Location explicitly.
+      const session = yield* store.get(sessionID)
+      yield* events.publish(
+        SessionEvent.StatusChanged,
+        { sessionID, status, timestamp: yield* DateTime.now },
+        { location: session?.location },
+      )
+    })
     const coordinator = yield* SessionRunCoordinator.make<SessionSchema.ID, SessionRunner.RunError>({
       drain: Effect.fnUntraced(function* (sessionID: SessionSchema.ID, force) {
         const session = yield* store.get(sessionID)
@@ -26,6 +41,8 @@ const layer = Layer.effect(
           ),
         )
       }),
+      onActive: (sessionID) => publishStatus(sessionID, "busy"),
+      onIdle: (sessionID) => publishStatus(sessionID, "idle"),
     })
 
     return SessionExecution.Service.of({
@@ -41,7 +58,7 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: SessionExecution.Service,
   layer,
-  deps: [SessionStore.node, LocationServiceMap.node],
+  deps: [SessionStore.node, LocationServiceMap.node, EventV2.node],
 })
 
 export * as SessionExecutionLocal from "./local"
