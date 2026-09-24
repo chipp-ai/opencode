@@ -55,6 +55,11 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   experimentalV2Session: Config.boolean("OPENCODE_EXPERIMENTAL_V2_SESSION").pipe(Config.withDefault(true)),
   outputTokenMax: positiveInteger("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"),
   bashDefaultTimeoutMs: positiveInteger("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"),
+  // Language servers with no request for this long are shut down (whole process tree) and
+  // respawned lazily on the next request. Unset uses the LSP service's default.
+  lspIdleTimeoutMs: positiveInteger("OPENCODE_LSP_IDLE_TIMEOUT_MS"),
+  // Opt-in: loaded instances with no lease holder and no activity for this long are disposed.
+  instanceIdleTimeoutMs: positiveInteger("OPENCODE_INSTANCE_IDLE_TIMEOUT_MS"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),
   experimentalWebSockets: bool("OPENCODE_EXPERIMENTAL_WEBSOCKETS"),
   client: Config.string("OPENCODE_CLIENT").pipe(Config.withDefault("cli")),

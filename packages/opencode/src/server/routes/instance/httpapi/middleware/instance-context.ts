@@ -1,6 +1,6 @@
 import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 import { InstanceStore } from "@/project/instance-store"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Scope } from "effect"
 import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiMiddleware } from "effect/unstable/httpapi"
 import { WorkspaceRouteContext } from "./workspace-routing"
@@ -23,10 +23,12 @@ function decode(input: string): string {
 function provideInstanceContext<E>(
   effect: Effect.Effect<HttpServerResponse.HttpServerResponse, E>,
   store: InstanceStore.Interface,
-): Effect.Effect<HttpServerResponse.HttpServerResponse, E, WorkspaceRouteContext> {
+): Effect.Effect<HttpServerResponse.HttpServerResponse, E, WorkspaceRouteContext | Scope.Scope> {
   return Effect.gen(function* () {
     const route = yield* WorkspaceRouteContext
-    const ctx = yield* store.load({ directory: decode(route.directory) })
+    // Held in the request scope, which stays open until a streamed body (SSE, PTY socket)
+    // ends, so a connected client keeps its instance from being evicted as idle.
+    const ctx = yield* store.acquire({ directory: decode(route.directory) })
     return yield* effect.pipe(
       Effect.provideService(InstanceRef, ctx),
       Effect.provideService(WorkspaceRef, route.workspaceID),

@@ -8,8 +8,9 @@ import * as LSPServer from "./server"
 import { Config } from "@/config/config"
 import { Process } from "@/util/process"
 import { spawn as lspspawn } from "./launch"
-import { Effect, Layer, Context, Schema } from "effect"
+import { Clock, Duration, Effect, Layer, Context, Schedule, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
+import { IdleLease } from "@opencode-ai/core/util/idle-lease"
 import { containsPath } from "@/project/instance-context"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -109,11 +110,17 @@ const filterExperimentalServers = (servers: Record<string, LSPServer.Info>, flag
 
 type LocInput = { file: string; line: number; character: number }
 
+// A client with no request in flight and none for this long is shut down, process tree
+// included, and respawned by the next request that needs it.
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60_000
+const MAX_SWEEP_INTERVAL_MS = 60_000
+
 interface State {
   clients: LSPClient.Info[]
   servers: Record<string, LSPServer.Info>
   broken: Set<string>
   spawning: Map<string, Promise<LSPClient.Info | undefined>>
+  usage: IdleLease.Tracker<LSPClient.Info>
 }
 
 export interface Interface {
@@ -193,12 +200,33 @@ const layer = Layer.effect(
           servers,
           broken: new Set(),
           spawning: new Map(),
+          usage: new IdleLease.Tracker(),
         }
 
         yield* Effect.addFinalizer(() =>
           Effect.promise(async () => {
             await Promise.all(s.clients.map((client) => client.shutdown()))
           }),
+        )
+
+        const idleMs = flags.lspIdleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+        const interval = Duration.millis(Math.min(idleMs, MAX_SWEEP_INTERVAL_MS))
+        yield* Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis
+          const idle = s.usage.idle(idleMs, now)
+          if (idle.length === 0) return
+          s.clients = s.clients.filter((client) => !idle.includes(client))
+          idle.forEach((client) => s.usage.forget(client, now))
+          yield* Effect.logInfo("shutting down idle LSP clients", {
+            clients: idle.map((client) => `${client.serverID}:${client.root}`).join(", "),
+          })
+          yield* Effect.promise(() => Promise.all(idle.map((client) => client.shutdown())))
+          yield* events.publish(Event.Updated, {})
+        }).pipe(
+          Effect.catchCause((cause) => Effect.logWarning("LSP idle sweep failed", { cause })),
+          Effect.repeat(Schedule.spaced(interval)),
+          Effect.delay(interval),
+          Effect.forkScoped,
         )
 
         return s
@@ -209,6 +237,7 @@ const layer = Layer.effect(
       const ctx = yield* InstanceState.context
       if (!containsPath(file, ctx)) return [] as LSPClient.Info[]
       const s = yield* InstanceState.get(state)
+      const now = yield* Clock.currentTimeMillis
       const clients = yield* Effect.promise(async () => {
         const extension = path.parse(file).ext || file
         const result: LSPClient.Info[] = []
@@ -260,6 +289,7 @@ const layer = Layer.effect(
 
           const match = s.clients.find((x) => x.root === root && x.serverID === server.id)
           if (match) {
+            s.usage.touch(match, now)
             result.push(match)
             continue
           }
@@ -268,6 +298,7 @@ const layer = Layer.effect(
           if (inflight) {
             const client = await inflight
             if (!client) continue
+            s.usage.touch(client, now)
             result.push(client)
             continue
           }
@@ -284,6 +315,7 @@ const layer = Layer.effect(
           const client = await task
           if (!client) continue
 
+          s.usage.touch(client, now)
           result.push(client)
           updated++
         }
@@ -296,14 +328,32 @@ const layer = Layer.effect(
       return clients.result
     })
 
+    // Holds each client busy for the duration of `use`, so the idle sweep never shuts down a
+    // server that is still answering a request.
+    const hold = Effect.fnUntraced(function* <A>(clients: LSPClient.Info[], use: Effect.Effect<A>) {
+      const s = yield* InstanceState.get(state)
+      return yield* Effect.acquireUseRelease(
+        Effect.map(Clock.currentTimeMillis, (now) => clients.map((client) => s.usage.acquire(client, now))),
+        () => use,
+        (releases) => Effect.map(Clock.currentTimeMillis, (now) => releases.forEach((release) => release(now))),
+      )
+    })
+
     const run = Effect.fnUntraced(function* <T>(file: string, fn: (client: LSPClient.Info) => Promise<T>) {
       const clients = yield* getClients(file)
-      return yield* Effect.promise(() => Promise.all(clients.map((x) => fn(x))))
+      return yield* hold(
+        clients,
+        Effect.promise(() => Promise.all(clients.map((x) => fn(x)))),
+      )
     })
 
     const runAll = Effect.fnUntraced(function* <T>(fn: (client: LSPClient.Info) => Promise<T>) {
       const s = yield* InstanceState.get(state)
-      return yield* Effect.promise(() => Promise.all(s.clients.map((x) => fn(x))))
+      const clients = [...s.clients]
+      return yield* hold(
+        clients,
+        Effect.promise(() => Promise.all(clients.map((x) => fn(x)))),
+      )
     })
 
     const init = Effect.fn("LSP.init")(function* () {
@@ -344,20 +394,23 @@ const layer = Layer.effect(
     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
       yield* Effect.logInfo("touching file", { file: input })
       const clients = yield* getClients(input)
-      yield* Effect.promise(() =>
-        Promise.all(
-          clients.map(async (client) => {
-            const after = Date.now()
-            const version = await client.notify.open({ path: input })
-            if (!diagnostics) return
-            return client.waitForDiagnostics({
-              path: input,
-              version,
-              mode: diagnostics,
-              after,
-            })
-          }),
-        ).catch(() => {}),
+      yield* hold(
+        clients,
+        Effect.promise(() =>
+          Promise.all(
+            clients.map(async (client) => {
+              const after = Date.now()
+              const version = await client.notify.open({ path: input })
+              if (!diagnostics) return
+              return client.waitForDiagnostics({
+                path: input,
+                version,
+                mode: diagnostics,
+                after,
+              })
+            }),
+          ).catch(() => {}),
+        ),
       )
     })
 
