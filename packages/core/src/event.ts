@@ -165,6 +165,13 @@ export const allBounded = (events: Interface, capacity: number) =>
 
 export interface LayerOptions {
   readonly beforeAggregateRead?: (aggregateID: string) => Effect.Effect<void>
+  /**
+   * Transforms the encoded payload of each durable event before it is compared for replay or written to the
+   * event log, e.g. `EventPersistPolicy.apply`. Must be pure and idempotent, because a replayed event is
+   * transformed again and compared with the stored row. Projectors and subscribers still receive the original
+   * payload, but the event log, `durable()` streams, and history reads return the transformed copy.
+   */
+  readonly persist?: (data: Record<string, unknown>) => Record<string, unknown>
 }
 
 export const layerWith = (options?: LayerOptions) =>
@@ -247,10 +254,8 @@ export const layerWith = (options?: LayerOptions) =>
                             .get()
                             .pipe(Effect.orDie)
                           const latest = row?.seq ?? -1
-                          const encoded = Schema.encodeUnknownSync(definition.data)(event.data) as Record<
-                            string,
-                            unknown
-                          >
+                          const raw = Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>
+                          const encoded = options?.persist ? options.persist(raw) : raw
                           if (input?.strictOwner && row?.ownerID && row.ownerID !== input.ownerID) {
                             yield* Effect.die(
                               new InvalidDurableEventError({

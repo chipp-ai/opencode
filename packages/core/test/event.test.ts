@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
 import { EventV2 } from "@opencode-ai/core/event"
+import { EventPersistPolicy } from "@opencode-ai/core/event/persist-policy"
 import { Event } from "@opencode-ai/schema/event"
 import { Session } from "@opencode-ai/schema/session"
 import { SessionEvent } from "@opencode-ai/schema/session-event"
@@ -1121,4 +1122,84 @@ describe("EventV2", () => {
       expect(received[0]?.data).toEqual(durableData(aggregateID, "replayed"))
     }),
   )
+
+  describe("persist policy", () => {
+    const withPolicy = <A, E>(effect: Effect.Effect<A, E, EventV2.Service | Database.Service>) => {
+      const database = LayerNode.compile(Database.node)
+      const eventLayer = EventV2.layerWith({ persist: EventPersistPolicy.apply }).pipe(Layer.provide(database))
+      return effect.pipe(Effect.provide(Layer.merge(database, eventLayer)))
+    }
+    const secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    const giant = "x".repeat(EventPersistPolicy.MAX_STRING_BYTES + 10_000)
+    const storedTitles = (aggregateID: string) =>
+      Effect.gen(function* () {
+        const { db } = yield* Database.Service
+        const rows = yield* db
+          .select()
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, aggregateID))
+          .all()
+          .pipe(Effect.orDie)
+        return rows.map((row) => row.data.title as string)
+      })
+
+    it.effect("stores durable payloads unchanged when no policy is configured", () =>
+      Effect.gen(function* () {
+        const events = yield* EventV2.Service
+        const sessionID = Session.ID.create()
+        yield* events.publish(SessionEvent.TitleChanged, {
+          sessionID,
+          timestamp: DateTime.makeUnsafe(1),
+          title: `leaked ${secret}`,
+        })
+        expect(yield* storedTitles(sessionID)).toEqual([`leaked ${secret}`])
+      }),
+    )
+
+    it.effect("redacts and truncates the persisted copy while subscribers see the original", () =>
+      withPolicy(
+        Effect.gen(function* () {
+          const events = yield* EventV2.Service
+          const sessionID = Session.ID.create()
+          const received = new Array<string>()
+          yield* events.project(SessionEvent.TitleChanged, (event) =>
+            Effect.sync(() => {
+              received.push(event.data.title)
+            }),
+          )
+          const titles = [`leaked ${secret}`, giant, "ordinary title"]
+          for (const title of titles)
+            yield* events.publish(SessionEvent.TitleChanged, { sessionID, timestamp: DateTime.makeUnsafe(1), title })
+
+          const stored = yield* storedTitles(sessionID)
+          expect(stored[0]).toBe("leaked [REDACTED:openai-key]")
+          expect(new TextEncoder().encode(stored[1]).length).toBeLessThanOrEqual(EventPersistPolicy.MAX_STRING_BYTES)
+          expect(stored[1]).toContain("[truncated: original length")
+          expect(stored[2]).toBe("ordinary title")
+          expect(received).toEqual(titles)
+        }),
+      ),
+    )
+
+    it.effect("replays an original event against its transformed row idempotently", () =>
+      withPolicy(
+        Effect.gen(function* () {
+          const events = yield* EventV2.Service
+          const sessionID = Session.ID.create()
+          const event = {
+            id: EventV2.ID.create(),
+            type: EventV2.versionedType(SessionEvent.TitleChanged.type, 1),
+            seq: 0,
+            aggregateID: sessionID,
+            data: { sessionID, timestamp: 1, title: `${secret} ${giant}` },
+          }
+          yield* events.replay(event)
+          yield* events.replay(event)
+          const stored = yield* storedTitles(sessionID)
+          expect(stored).toHaveLength(1)
+          expect(stored[0]).toStartWith("[REDACTED:openai-key] xxx")
+        }),
+      ),
+    )
+  })
 })
