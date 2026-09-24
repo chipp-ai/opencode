@@ -1,5 +1,6 @@
 export * as WorkflowAgentDispatch from "./agent-dispatch"
 
+import { JsonSchemaValidator } from "@opencode-ai/llm"
 import type { PromptInput } from "@opencode-ai/schema/prompt-input"
 import { Deferred, Effect, Option, Schema } from "effect"
 import { AgentV2 } from "../agent"
@@ -43,14 +44,12 @@ export type Input = {
    * Instead: a strong system-prompt nudge plus an ephemeral tool whose call is
    * raced against session settlement -- whichever resolves first wins, and a
    * structured-tool win immediately interrupts the session so it doesn't keep
-   * stepping. Known gap: the captured value is NOT deep-validated against
-   * `schema` (Effect has no JSON-Schema-to-validator compiler available here) --
-   * it's whatever object the model actually passed as tool arguments. The schema
-   * is advertised to the model via the tool description text, and via the tool's
-   * generated input schema when it happens to be representable by a plain
-   * key-value record (the common case), but a schema-violating call still
-   * succeeds rather than retrying. Tracked as a follow-up, not silently assumed
-   * away -- see FORK_CHANGES.md.
+   * stepping. The tool's arguments are validated against `schema` with
+   * `JsonSchemaValidator`; a schema-violating call is rejected back to the model
+   * as an ordinary tool error (like any typed tool-input decode failure), so it
+   * can retry, and nothing is captured. The exact schema is advertised to the
+   * model only via the system nudge and tool description text -- the tool's
+   * generated input schema is still a plain key-value record.
    */
   readonly structuredOutput?: StructuredOutputInput
 }
@@ -138,10 +137,11 @@ export const run = Effect.fn("WorkflowAgentDispatch.run")(function* (input: Inpu
               "",
               JSON.stringify(input.structuredOutput.schema, null, 2),
             ].join("\n"),
-            input: Schema.Record(Schema.String, Schema.Unknown),
+            input: Schema.Record(Schema.String, Schema.Unknown).check(
+              JsonSchemaValidator.check(input.structuredOutput.schema),
+            ),
             output: Schema.Struct({ ok: Schema.Boolean }),
-            execute: (args) =>
-              Deferred.succeed(captured, args as Record<string, unknown>).pipe(Effect.as({ ok: true })),
+            execute: (args) => Deferred.succeed(captured, args).pipe(Effect.as({ ok: true })),
             toModelOutput: () => [{ type: "text", text: "Structured output captured." }],
           }),
         })

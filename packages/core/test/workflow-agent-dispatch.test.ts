@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { LLMClient, LLMEvent, Model, Usage, type LLMClientShape } from "@opencode-ai/llm"
+import { LLMClient, LLMEvent, Model, Usage, type LLMClientShape, type LLMRequest } from "@opencode-ai/llm"
 import * as OpenAIChat from "@opencode-ai/llm/protocols/openai-chat"
 import { Effect, Layer, Stream } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
@@ -34,11 +34,17 @@ import { WorkflowAgentDispatch } from "@opencode-ai/core/workflow/agent-dispatch
 import { testEffect } from "./lib/effect"
 
 let response: LLMEvent[] = []
+// Per-turn responses consumed before falling back to `response`, for multi-turn scenarios.
+let turns: LLMEvent[][] = []
+let requests: LLMRequest[] = []
 const client = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
     prepare: () => Effect.die("unused"),
-    stream: (() => Stream.fromIterable(response)) as unknown as LLMClientShape["stream"],
+    stream: ((request: LLMRequest) => {
+      requests.push(request)
+      return Stream.fromIterable(turns.shift() ?? response)
+    }) as unknown as LLMClientShape["stream"],
     generate: () => Effect.die("unused"),
   }),
 )
@@ -230,6 +236,73 @@ describe("WorkflowAgentDispatch.run", () => {
       })
 
       expect(result.structured).toEqual({ answer: 42 })
+      expect(result.timedOut).toBe(false)
+    }),
+  )
+
+  it.effect("rejects a StructuredOutput call that violates the schema so the model can retry", () =>
+    Effect.gen(function* () {
+      requests = []
+      const structuredCall = (id: string, input: unknown) =>
+        ([
+          { type: "tool-call", id, name: "StructuredOutput", input },
+          { type: "step-finish", index: 0, reason: "tool-calls", usage: new Usage({ inputTokens: 1, outputTokens: 1 }) },
+          { type: "finish", reason: "tool-calls" },
+        ] as unknown) as LLMEvent[]
+      turns = [structuredCall("call_bad", { answer: "forty-two", extra: true }), structuredCall("call_ok", { answer: 42 })]
+      response = okResponse()
+
+      const result = yield* WorkflowAgentDispatch.run({
+        location,
+        persona: "You are a helpful test agent.",
+        prompt: { text: "what is the answer?" },
+        structuredOutput: {
+          schema: {
+            type: "object",
+            properties: { answer: { type: "number" } },
+            required: ["answer"],
+            additionalProperties: false,
+          },
+        },
+      })
+
+      expect(result.structured).toEqual({ answer: 42 })
+      expect(requests).toHaveLength(2)
+      const rejection = requests[1]?.messages
+        .flatMap((message) => message.content)
+        .find((part) => part.type === "tool-result" && part.id === "call_bad")
+      expect(rejection).toMatchObject({
+        type: "tool-result",
+        result: {
+          type: "error",
+          value: {
+            error: {
+              message: 'Invalid tool input: is not an allowed property\n  at ["extra"]\nmust be number\n  at ["answer"]',
+            },
+          },
+        },
+      })
+    }),
+  )
+
+  it.effect("captures nothing when every StructuredOutput call violates the schema", () =>
+    Effect.gen(function* () {
+      turns = []
+      response = ([
+        { type: "tool-call", id: "call_bad", name: "StructuredOutput", input: { wrong: true } },
+        { type: "step-finish", index: 0, reason: "tool-calls", usage: new Usage({ inputTokens: 1, outputTokens: 1 }) },
+        { type: "finish", reason: "tool-calls" },
+      ] as unknown) as LLMEvent[]
+
+      const result = yield* WorkflowAgentDispatch.run({
+        location,
+        persona: "test",
+        prompt: { text: "hi" },
+        steps: 2,
+        structuredOutput: { schema: { type: "object", required: ["answer"] } },
+      })
+
+      expect(result.structured).toBeUndefined()
       expect(result.timedOut).toBe(false)
     }),
   )

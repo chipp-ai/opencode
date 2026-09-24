@@ -153,7 +153,9 @@ const runGenerateObject = Effect.fn("LLM.generateObject")(function* (
  * 1. `schema: EffectSchema<T>` — `.object` is decoded and typed as `T`.
  *    Decode failures surface as `LLMError`.
  * 2. `jsonSchema: JsonSchema.JsonSchema` — `.object` is `unknown`. Use when
- *    the schema is only available at runtime (MCP, plugin manifests). Caller validates.
+ *    the schema is only available at runtime (MCP, plugin manifests).
+ *    `.object` is validated against `jsonSchema` (see `JsonSchemaValidator`);
+ *    validation failures surface as `LLMError`.
  */
 export function generateObject<S extends ToolSchema<any>>(
   options: GenerateObjectOptions<S>,

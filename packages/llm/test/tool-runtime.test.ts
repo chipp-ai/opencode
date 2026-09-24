@@ -377,6 +377,36 @@ describe("LLMClient tools", () => {
     }),
   )
 
+  it.effect("rejects dynamic tool arguments that violate the JSON Schema back to the model", () =>
+    Effect.gen(function* () {
+      const executed: unknown[] = []
+      const lookup = Tool.make({
+        description: "Look up a city.",
+        jsonSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+        execute: (params) =>
+          Effect.sync(() => {
+            executed.push(params)
+            return { ok: true }
+          }),
+      })
+
+      const rejected = yield* ToolRuntime.dispatch(
+        { lookup },
+        LLMEvent.toolCall({ id: "call_1", name: "lookup", input: { city: 7 } }),
+      )
+      expect(executed).toEqual([])
+      expect(rejected.result).toEqual({ type: "error", value: 'Invalid tool input: must be string\n  at ["city"]' })
+      expect(rejected.events.map((event) => event.type)).toEqual(["tool-error", "tool-result"])
+
+      const accepted = yield* ToolRuntime.dispatch(
+        { lookup },
+        LLMEvent.toolCall({ id: "call_2", name: "lookup", input: { city: "Paris" } }),
+      )
+      expect(executed).toEqual([{ city: "Paris" }])
+      expect(accepted.result).toEqual({ type: "json", value: { ok: true } })
+    }),
+  )
+
   it.effect("does not mistake dynamic tool output fields for dispatcher state", () =>
     Effect.gen(function* () {
       const callerOwned = { type: "json" as const, value: { ok: true }, events: ["caller-owned"] }

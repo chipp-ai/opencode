@@ -5,6 +5,7 @@ import type {
   ToolDefinition as ToolDefinitionClass,
   ToolOutput as ToolOutputType,
 } from "./schema"
+import { JsonSchemaValidator } from "./json-schema-validator"
 import { ToolDefinition, ToolFailure, ToolOutput } from "./schema"
 
 /**
@@ -117,7 +118,9 @@ type DynamicToolConfig = {
  * 2. **Dynamic** — pass raw JSON Schema as `jsonSchema`. Use this when the
  *    schema comes from an external source (MCP server, plugin manifest,
  *    dynamic config) and is not known at compile time. Inputs are typed as
- *    `unknown`; the handler is responsible for any validation it needs.
+ *    `unknown` but are validated against `jsonSchema` (see
+ *    `JsonSchemaValidator`) before `execute` runs, exactly like typed
+ *    `parameters` decoding.
  *
  *    ```ts
  *    Tool.make({
@@ -164,14 +167,15 @@ export function make(config: {
 }): AnyTool
 export function make(config: TypedToolConfig | DynamicToolConfig): AnyTool {
   if ("jsonSchema" in config) {
+    const parameters = JsonSchemaValidator.schema(config.jsonSchema)
     return {
       description: config.description,
-      parameters: Schema.Unknown as ToolSchema<unknown>,
+      parameters,
       success: Schema.Unknown as ToolSchema<unknown>,
       execute: config.execute,
       toModelOutput: config.toModelOutput,
       toStructuredOutput: config.toStructuredOutput,
-      _decode: Effect.succeed,
+      _decode: Schema.decodeUnknownEffect(parameters),
       _encode: Effect.succeed,
       _project: (parameters, callID, output) =>
         project(config.toModelOutput, config.toStructuredOutput, parameters, callID, output),

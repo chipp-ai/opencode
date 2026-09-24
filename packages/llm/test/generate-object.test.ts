@@ -59,6 +59,26 @@ describe("Tool.make (dynamic JSON Schema)", () => {
     expect(seen).toEqual([{ hello: "world" }])
     expect(result).toEqual({ ok: true })
   })
+
+  test("_decode validates model-supplied arguments against the JSON Schema", async () => {
+    const tool = Tool.make({
+      description: "lookup",
+      jsonSchema: {
+        type: "object",
+        properties: { city: { type: "string" }, units: { enum: ["c", "f"] } },
+        required: ["city"],
+        additionalProperties: false,
+      },
+      execute: () => Effect.succeed({ ok: true }),
+    })
+
+    expect(await Effect.runPromise(tool._decode({ city: "Paris", units: "c" }))).toEqual({ city: "Paris", units: "c" })
+    const error = await Effect.runPromise(Effect.flip(tool._decode({ city: 1, units: "k", extra: true })))
+    expect(Schema.isSchemaError(error)).toBe(true)
+    expect(error.message).toContain("must be string\n  at [\"city\"]")
+    expect(error.message).toContain('must be equal to one of the allowed values: "c", "f"\n  at ["units"]')
+    expect(error.message).toContain('is not an allowed property\n  at ["extra"]')
+  })
 })
 
 describe("LLM.generateObject", () => {
@@ -135,6 +155,33 @@ describe("LLM.generateObject", () => {
         properties: { name: { type: "string" }, age: { type: "number" } },
         required: ["name", "age"],
       })
+    }),
+  )
+
+  it.effect("fails when the model's object does not match the raw JSON Schema", () =>
+    Effect.gen(function* () {
+      const layer = dynamicResponse((input) =>
+        Effect.sync(() =>
+          input.respond(
+            sseEvents(toolCallChunk("call_1", "generate_object", '{"name":"Ada"}'), finishChunk("tool_calls")),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+        ),
+      )
+
+      const error = yield* LLM.generateObject({
+        model,
+        prompt: "Extract the user.",
+        jsonSchema: {
+          type: "object",
+          properties: { name: { type: "string" }, age: { type: "number" } },
+          required: ["name", "age"],
+        },
+      }).pipe(Effect.provide(layer), Effect.flip)
+
+      expect(error.reason._tag).toBe("InvalidProviderOutput")
+      expect(error.message).toContain("generateObject: tool input failed schema decode")
+      expect(error.message).toContain('is required\n  at ["age"]')
     }),
   )
 
