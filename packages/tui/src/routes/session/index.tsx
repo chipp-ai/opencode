@@ -89,11 +89,14 @@ import { LocationProvider } from "../../context/location"
 import { createStore, reconcile } from "solid-js/store"
 import {
   isV2Session,
+  liveSwitch,
+  switchLabel,
   toV1Permission,
   toV1Question,
   toV1Transcript,
   V2_UNAVAILABLE_COMMANDS,
   v2UnavailableMessage,
+  type V2Switch,
 } from "../../util/v2-session"
 import { errorTarget, findMatches, highlightSegments, stepIndex } from "../../util/session-find"
 import { SessionFindBar } from "./find"
@@ -246,9 +249,14 @@ export function Session() {
   const v2 = createMemo(() => v2SessionID() === route.sessionID)
   // The shared renderers take V1 message/part shapes, so project the V2 bridge's transcript into a store
   // and reconcile by id to keep row identity (and per-row UI state) stable across streaming updates.
-  const [v2Transcript, setV2Transcript] = createStore<{ messages: Message[]; parts: Record<string, Part[]> }>({
+  const [v2Transcript, setV2Transcript] = createStore<{
+    messages: Message[]
+    parts: Record<string, Part[]>
+    switches: Record<string, V2Switch[]>
+  }>({
     messages: [],
     parts: {},
+    switches: {},
   })
   createEffect(() => {
     if (!v2()) return
@@ -265,7 +273,9 @@ export function Session() {
     })
     setV2Transcript("messages", reconcile(transcript.messages))
     setV2Transcript("parts", reconcile(transcript.parts))
+    setV2Transcript("switches", reconcile(transcript.switches))
   })
+  const switchesAfter = (id: string) => (v2() ? v2Transcript.switches[id] : undefined) ?? []
   const messages = createMemo(() => (v2() ? v2Transcript.messages : (sync.data.message[route.sessionID] ?? [])))
   const partsFor = (messageID: string) => (v2() ? v2Transcript.parts[messageID] : sync.data.part[messageID]) ?? []
   const messagesBeforeRevert = () => {
@@ -542,6 +552,56 @@ export function Session() {
   }
 
   const local = useLocal()
+
+  // A live switch (model fallback, or a switch made from another client) is announced and adopted as the
+  // local prompt selection; otherwise the next submit's v2SwitchPlan would silently switch back to the
+  // stale selection. Switches the local selection already matches were initiated here and stay quiet.
+  const openedAt = createMemo(on(() => route.sessionID, () => Date.now()))
+  createEffect(
+    on(
+      () => {
+        if (!v2()) return undefined
+        const list = data.session.message.list(route.sessionID) ?? []
+        return {
+          sessionID: route.sessionID,
+          agent: list.find((message) => message.type === "agent-switched"),
+          model: list.find((message) => message.type === "model-switched"),
+        }
+      },
+      (current, previous) => {
+        if (!current) return
+        const live = (kind: "agent" | "model") =>
+          liveSwitch(
+            previous && { sessionID: previous.sessionID, id: previous[kind]?.id },
+            { sessionID: current.sessionID, id: current[kind]?.id, created: current[kind]?.time.created },
+            openedAt(),
+          )
+        // Agent first: the local model selection is stored per agent.
+        const agent = current.agent
+        if (
+          agent?.type === "agent-switched" &&
+          live("agent") &&
+          local.agent.current()?.name !== agent.agent &&
+          local.agent.list().some((item) => item.name === agent.agent)
+        ) {
+          local.agent.set(agent.agent)
+          toast.show({ title: "Agent switched", message: switchLabel(agent, providers()), variant: "info" })
+        }
+        const model = current.model
+        const selected = local.model.current()
+        if (
+          model?.type === "model-switched" &&
+          live("model") &&
+          (selected?.providerID !== model.model.providerID || selected.modelID !== model.model.id)
+        ) {
+          local.model.set({ providerID: model.model.providerID, modelID: model.model.id })
+          local.model.variant.set(model.model.variant)
+          toast.show({ title: "Model switched", message: switchLabel(model, providers()), variant: "info" })
+        }
+      },
+      { defer: true },
+    ),
+  )
 
   function enterChild(sessionID: string) {
     navigate({
@@ -1339,108 +1399,112 @@ export function Session() {
                 scrollAcceleration={scrollAcceleration()}
               >
                 <box height={1} />
+                <For each={switchesAfter("")}>{(item) => <SwitchMarker item={item} />}</For>
                 <For each={messages()}>
                   {(message, index) => (
-                    <Switch>
-                      <Match when={message.id === revert()?.messageID}>
-                        {(function () {
-                          const redoShortcut = useCommandShortcut("session.redo")
-                          const [hover, setHover] = createSignal(false)
-                          const dialog = useDialog()
+                    <>
+                      <Switch>
+                        <Match when={message.id === revert()?.messageID}>
+                          {(function () {
+                            const redoShortcut = useCommandShortcut("session.redo")
+                            const [hover, setHover] = createSignal(false)
+                            const dialog = useDialog()
 
-                          const handleUnrevert = async () => {
-                            const confirmed = await DialogConfirm.show(
-                              dialog,
-                              "Confirm Redo",
-                              "Are you sure you want to restore the reverted messages?",
-                            )
-                            if (confirmed) {
-                              keymap.dispatchCommand("session.redo")
+                            const handleUnrevert = async () => {
+                              const confirmed = await DialogConfirm.show(
+                                dialog,
+                                "Confirm Redo",
+                                "Are you sure you want to restore the reverted messages?",
+                              )
+                              if (confirmed) {
+                                keymap.dispatchCommand("session.redo")
+                              }
                             }
-                          }
 
-                          return (
-                            <box
-                              onMouseOver={() => setHover(true)}
-                              onMouseOut={() => setHover(false)}
-                              onMouseUp={handleUnrevert}
-                              marginTop={1}
-                              flexShrink={0}
-                              border={["left"]}
-                              customBorderChars={SplitBorder.customBorderChars}
-                              borderColor={theme.backgroundPanel}
-                            >
+                            return (
                               <box
-                                paddingTop={1}
-                                paddingBottom={1}
-                                paddingLeft={2}
-                                backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+                                onMouseOver={() => setHover(true)}
+                                onMouseOut={() => setHover(false)}
+                                onMouseUp={handleUnrevert}
+                                marginTop={1}
+                                flexShrink={0}
+                                border={["left"]}
+                                customBorderChars={SplitBorder.customBorderChars}
+                                borderColor={theme.backgroundPanel}
                               >
-                                <text fg={theme.textMuted}>{revert()!.reverted.length} message reverted</text>
-                                <text fg={theme.textMuted}>
-                                  <span style={{ fg: theme.text }}>{redoShortcut()}</span> or /redo to restore
-                                </text>
-                                <Show when={revert()!.diffFiles?.length}>
-                                  <box marginTop={1}>
-                                    <For each={revert()!.diffFiles}>
-                                      {(file) => (
-                                        <text fg={theme.text}>
-                                          {file.filename}
-                                          <Show when={file.additions > 0}>
-                                            <span style={{ fg: theme.diffAdded }}> +{file.additions}</span>
-                                          </Show>
-                                          <Show when={file.deletions > 0}>
-                                            <span style={{ fg: theme.diffRemoved }}> -{file.deletions}</span>
-                                          </Show>
-                                        </text>
-                                      )}
-                                    </For>
-                                  </box>
-                                </Show>
+                                <box
+                                  paddingTop={1}
+                                  paddingBottom={1}
+                                  paddingLeft={2}
+                                  backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+                                >
+                                  <text fg={theme.textMuted}>{revert()!.reverted.length} message reverted</text>
+                                  <text fg={theme.textMuted}>
+                                    <span style={{ fg: theme.text }}>{redoShortcut()}</span> or /redo to restore
+                                  </text>
+                                  <Show when={revert()!.diffFiles?.length}>
+                                    <box marginTop={1}>
+                                      <For each={revert()!.diffFiles}>
+                                        {(file) => (
+                                          <text fg={theme.text}>
+                                            {file.filename}
+                                            <Show when={file.additions > 0}>
+                                              <span style={{ fg: theme.diffAdded }}> +{file.additions}</span>
+                                            </Show>
+                                            <Show when={file.deletions > 0}>
+                                              <span style={{ fg: theme.diffRemoved }}> -{file.deletions}</span>
+                                            </Show>
+                                          </text>
+                                        )}
+                                      </For>
+                                    </box>
+                                  </Show>
+                                </box>
                               </box>
-                            </box>
-                          )
-                        })()}
-                      </Match>
-                      <Match
-                        when={revert()?.messageID && revertMessageIndex() !== -1 && index() >= revertMessageIndex()}
-                      >
-                        <></>
-                      </Match>
-                      <Match when={message.role === "user"}>
-                        <UserMessage
-                          index={index()}
-                          onMouseUp={() => {
-                            if (renderer.getSelection()?.getSelectedText()) return
-                            if (v2()) {
-                              toast.show({
-                                message: v2UnavailableMessage("Message actions"),
-                                variant: "warning",
-                                duration: 3000,
-                              })
-                              return
-                            }
-                            dialog.replace(() => (
-                              <DialogMessage
-                                messageID={message.id}
-                                sessionID={route.sessionID}
-                                setPrompt={(promptInfo) => prompt?.set(promptInfo)}
-                              />
-                            ))
-                          }}
-                          message={message as UserMessage}
-                          parts={partsFor(message.id)}
-                          pending={pending()}
-                        />
-                      </Match>
-                      <Match when={message.role === "assistant"}>
-                        <AssistantMessage
-                          last={lastAssistant()?.id === message.id}
-                          message={message as AssistantMessage}
-                          parts={partsFor(message.id)}
-                        />
-                      </Match>
-                    </Switch>
+                            )
+                          })()}
+                        </Match>
+                        <Match
+                          when={revert()?.messageID && revertMessageIndex() !== -1 && index() >= revertMessageIndex()}
+                        >
+                          <></>
+                        </Match>
+                        <Match when={message.role === "user"}>
+                          <UserMessage
+                            index={index()}
+                            onMouseUp={() => {
+                              if (renderer.getSelection()?.getSelectedText()) return
+                              if (v2()) {
+                                toast.show({
+                                  message: v2UnavailableMessage("Message actions"),
+                                  variant: "warning",
+                                  duration: 3000,
+                                })
+                                return
+                              }
+                              dialog.replace(() => (
+                                <DialogMessage
+                                  messageID={message.id}
+                                  sessionID={route.sessionID}
+                                  setPrompt={(promptInfo) => prompt?.set(promptInfo)}
+                                />
+                              ))
+                            }}
+                            message={message as UserMessage}
+                            parts={partsFor(message.id)}
+                            pending={pending()}
+                          />
+                        </Match>
+                        <Match when={message.role === "assistant"}>
+                          <AssistantMessage
+                            last={lastAssistant()?.id === message.id}
+                            message={message as AssistantMessage}
+                            parts={partsFor(message.id)}
+                          />
+                        </Match>
+                      </Switch>
+                      <For each={switchesAfter(message.id)}>{(item) => <SwitchMarker item={item} />}</For>
+                    </>
                   )}
                 </For>
               </scrollbox>
@@ -1651,6 +1715,22 @@ function UserMessage(props: {
         />
       </Show>
     </>
+  )
+}
+
+// Muted marker for a durable V2 agent/model switch, styled like the assistant footer row.
+function SwitchMarker(props: { item: V2Switch }) {
+  const ctx = use()
+  const { theme } = useTheme()
+  return (
+    <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} flexShrink={0}>
+      <text marginTop={1} fg={theme.textMuted}>
+        ⇄ {switchLabel(props.item, ctx.providers())}
+        <Show when={ctx.showTimestamps()}>
+          <span> · {Locale.todayTimeOrDateTime(props.item.time.created)}</span>
+        </Show>
+      </text>
+    </box>
   )
 }
 

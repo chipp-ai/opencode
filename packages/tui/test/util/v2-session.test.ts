@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test"
-import type { SessionMessage } from "@opencode-ai/sdk/v2"
+import type { Provider, SessionMessage } from "@opencode-ai/sdk/v2"
 import {
   isV2Session,
   isV2SessionBusy,
+  liveSwitch,
+  switchLabel,
   toV1Permission,
   toV1Question,
   toV1Transcript,
   toV2Prompt,
   V2_UNAVAILABLE_COMMANDS,
   v2SwitchPlan,
+  type V2Switch,
 } from "../../src/util/v2-session"
 
 const model = { providerID: "anthropic", id: "claude" }
@@ -329,5 +332,131 @@ describe("toV1Transcript", () => {
     })
     const assistant = failed.messages[0]
     expect(assistant.role === "assistant" && assistant.error).toEqual({ name: "UnknownError", data: { message: "boom" } })
+  })
+})
+
+describe("toV1Transcript switches", () => {
+  const primary = { providerID: "fake", id: "primary" }
+  const backup = { providerID: "fake", id: "backup" }
+  // Newest-first: a switch before any prompt, a prompt, then switches and a continuation on the fallback model.
+  const transcript = toV1Transcript({
+    sessionID: "ses_1",
+    directory: "/repo",
+    agent: "build",
+    model: primary,
+    messages: [
+      {
+        id: "msg_a2",
+        type: "assistant",
+        agent: "build",
+        model: backup,
+        time: { created: 5, completed: 6 },
+        content: [{ type: "text", id: "t", text: "ok" }],
+      },
+      { id: "msg_m", type: "model-switched", model: backup, time: { created: 4 } },
+      { id: "msg_g", type: "agent-switched", agent: "plan", time: { created: 3 } },
+      { id: "msg_u", type: "user", text: "hi", time: { created: 2 } },
+      { id: "msg_m0", type: "model-switched", model: primary, time: { created: 1 } },
+    ],
+  })
+
+  test("anchors each switch after the entry it follows, oldest first", () => {
+    const ids = Object.fromEntries(
+      Object.entries(transcript.switches).map(([key, list]) => [key, list.map((item) => item.id)]),
+    )
+    expect(ids).toEqual({ "": ["msg_m0"], msg_u: ["msg_g", "msg_m"] })
+  })
+
+  test("keeps switches out of the V1 message list", () => {
+    expect(transcript.messages.map((message) => message.id)).toEqual(["msg_u", "msg_a2"])
+  })
+})
+
+describe("switchLabel", () => {
+  const providers: Provider[] = [
+    {
+      id: "fake",
+      name: "Fake",
+      source: "config",
+      env: [],
+      options: {},
+      models: {
+        backup: {
+          id: "backup",
+          providerID: "fake",
+          api: { id: "backup", url: "http://localhost", npm: "@ai-sdk/openai-compatible" },
+          name: "Backup",
+          capabilities: {
+            temperature: true,
+            reasoning: false,
+            attachment: false,
+            toolcall: true,
+            input: { text: true, audio: false, image: false, video: false, pdf: false },
+            output: { text: true, audio: false, image: false, video: false, pdf: false },
+            interleaved: false,
+          },
+          cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+          limit: { context: 1000, output: 100 },
+          status: "active",
+          options: {},
+          headers: {},
+          release_date: "2026-01-01",
+        },
+      },
+    },
+  ]
+
+  test("names the model with its catalog display name", () => {
+    const item: V2Switch = {
+      id: "m",
+      type: "model-switched",
+      model: { providerID: "fake", id: "backup" },
+      time: { created: 1 },
+    }
+    expect(switchLabel(item, providers)).toBe("Switched to Backup")
+  })
+
+  test("falls back to the raw model id when the catalog does not know it", () => {
+    const item: V2Switch = {
+      id: "m",
+      type: "model-switched",
+      model: { providerID: "gone", id: "old-model" },
+      time: { created: 1 },
+    }
+    expect(switchLabel(item, providers)).toBe("Switched to old-model")
+  })
+
+  test("titlecases agent names", () => {
+    const item: V2Switch = { id: "g", type: "agent-switched", agent: "plan", time: { created: 1 } }
+    expect(switchLabel(item, providers)).toBe("Switched to Plan agent")
+  })
+})
+
+describe("liveSwitch", () => {
+  const openedAt = 1_000
+
+  test("ignores switches already in history when V2 history first loads", () => {
+    expect(liveSwitch(undefined, { sessionID: "ses_1", id: "msg_m", created: 500 }, openedAt)).toBe(false)
+  })
+
+  test("ignores past switches seen while navigating to another session", () => {
+    expect(
+      liveSwitch({ sessionID: "ses_1", id: "msg_a" }, { sessionID: "ses_2", id: "msg_b", created: 500 }, openedAt),
+    ).toBe(false)
+  })
+
+  test("counts a switch made after opening even when it lands before history finishes loading", () => {
+    // A new Session's first turn can fail over before the TUI marks it as loaded.
+    expect(liveSwitch(undefined, { sessionID: "ses_1", id: "msg_m", created: 1_200 }, openedAt)).toBe(true)
+  })
+
+  test("ignores transcript updates that leave the newest switch unchanged", () => {
+    expect(liveSwitch({ sessionID: "ses_1", id: "msg_m" }, { sessionID: "ses_1", id: "msg_m" }, openedAt)).toBe(false)
+    expect(liveSwitch({ sessionID: "ses_1" }, { sessionID: "ses_1" }, openedAt)).toBe(false)
+  })
+
+  test("detects a new switch in the loaded session, including its first one", () => {
+    expect(liveSwitch({ sessionID: "ses_1", id: "msg_m" }, { sessionID: "ses_1", id: "msg_n" }, openedAt)).toBe(true)
+    expect(liveSwitch({ sessionID: "ses_1" }, { sessionID: "ses_1", id: "msg_m" }, openedAt)).toBe(true)
   })
 })
