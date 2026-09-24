@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { ConfigProvider, Layer } from "effect"
+import path from "node:path"
+import { ConfigProvider, Effect, Layer } from "effect"
 import { HttpRouter } from "effect/unstable/http"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { GlobalPaths } from "../../src/server/routes/instance/httpapi/groups/global"
@@ -8,8 +9,10 @@ import { RouteExtension } from "../../src/server/routes/instance/httpapi/extensi
 import { ServerAuth } from "../../src/server/auth"
 import { Server } from "../../src/server/server"
 import { resetDatabase } from "../fixture/db"
-import { disposeAllInstances } from "../fixture/fixture"
+import { disposeAllInstances, tmpdir } from "../fixture/fixture"
 import { FACTORY_TOKEN_HEADER, FactoryPaths, factoryExtension } from "../fixture/route-extension"
+import { awaitWithTimeout, pollWithTimeout } from "../lib/effect"
+import { TestLLMServer } from "../lib/llm-server"
 
 const auth = { username: "opencode", password: "secret" }
 const factoryToken = "factory-secret"
@@ -123,4 +126,96 @@ describe("HttpApi route extensions", () => {
       await listener.stop(true)
     }
   })
+
+  test("an extension route continues a V2 session without holding the response for the model turn", () =>
+    Effect.gen(function* () {
+      Flag.OPENCODE_SERVER_PASSWORD = undefined
+      delete process.env.OPENCODE_SERVER_PASSWORD
+      const llm = yield* TestLLMServer
+      const directory = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir({ git: true })),
+        (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+      ).pipe(Effect.map((dir) => dir.path))
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(directory, "opencode.json"),
+          JSON.stringify({
+            providers: {
+              test: {
+                api: { type: "aisdk", package: "@ai-sdk/openai-compatible", url: llm.url, settings: {} },
+                request: { body: { apiKey: "test-key" } },
+                models: { "test-model": { limit: { context: 100_000, output: 10_000 } } },
+              },
+            },
+          }),
+        ),
+      )
+      const listener = yield* Effect.acquireRelease(
+        Effect.promise(() =>
+          Server.listen({ hostname: "127.0.0.1", port: 0, routeExtensions: [factoryExtension(factoryToken)] }),
+        ),
+        (server) => Effect.promise(() => server.stop(true)),
+      )
+      const request = (url: string, init?: RequestInit) =>
+        Effect.promise(() =>
+          fetch(new URL(url, listener.url), {
+            ...init,
+            headers: {
+              "content-type": "application/json",
+              "x-opencode-directory": directory,
+              ...factory,
+              ...(init?.headers as Record<string, string> | undefined),
+            },
+          }),
+        )
+      const json = <T>(response: Response) => Effect.promise(() => response.json() as Promise<T>)
+
+      const created = yield* request("/api/session", {
+        method: "POST",
+        body: JSON.stringify({ model: { providerID: "test", id: "test-model" }, location: { directory } }),
+      }).pipe(Effect.flatMap((response) => json<{ data: { id: string } }>(response)))
+      const sessionID = created.data.id
+      // Location plugins populate the V2 catalog asynchronously after the Location boots.
+      yield* pollWithTimeout(
+        request("/api/provider").pipe(
+          Effect.flatMap((response) => json<{ data: { id: string }[] }>(response)),
+          Effect.map(({ data }) => data.find((provider) => provider.id === "test")),
+        ),
+        "configured test provider never reached the V2 catalog",
+      )
+      const admitted = yield* request(`/api/session/${sessionID}/prompt`, {
+        method: "POST",
+        body: JSON.stringify({ prompt: { text: "continue me" }, resume: false }),
+      })
+      expect(admitted.status).toBe(200)
+
+      // The fake provider holds its reply until released, so the turn cannot finish before the response returns.
+      const release = Promise.withResolvers<void>()
+      yield* llm.hold("continued answer", release.promise)
+      const continued = yield* request(FactoryPaths.continue.replace(":sessionID", sessionID), { method: "POST" })
+      expect(continued.status).toBe(200)
+      expect(yield* json(continued)).toEqual({ started: true })
+
+      const context = (url: string) =>
+        request(url).pipe(Effect.flatMap((response) => json<{ data: { type: string }[] }>(response)))
+      // The response arrived while the provider was still holding the turn, so nothing has answered yet.
+      expect((yield* context(`/api/session/${sessionID}/context`)).data.map((message) => message.type)).not.toContain(
+        "assistant",
+      )
+      yield* awaitWithTimeout(llm.wait(1), "continue never reached the provider")
+
+      release.resolve()
+      expect((yield* request(`/api/session/${sessionID}/wait`, { method: "POST" })).status).toBe(204)
+      expect((yield* context(`/api/session/${sessionID}/context`)).data.map((message) => message.type)).toEqual([
+        "user",
+        "assistant",
+      ])
+
+      const missing = yield* request(FactoryPaths.continue.replace(":sessionID", "ses_missing_factory"), {
+        method: "POST",
+      })
+      expect(missing.status).toBe(404)
+      expect(yield* json(missing)).toEqual({ name: "FactorySessionNotFound", sessionID: "ses_missing_factory" })
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.scoped, Effect.runPromise),
+  )
 })

@@ -282,6 +282,8 @@ export type RouteExtensionServices =
   | RouteRequirements
   | Layer.Success<typeof HttpServer.layerServices>
   | LayerNode.Output<typeof app>
+  // Provided by the `SessionV2.node` build beneath every route, not by `app`.
+  | SessionV2.Service
 
 export type RouteOptions = {
   readonly routeExtensions?: ReadonlyArray<RouteExtension.RouteExtension>

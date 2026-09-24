@@ -1,5 +1,13 @@
 import { describe, expect } from "bun:test"
-import { LLMClient, LLMEvent, Model, type LLMClientShape, type LLMRequest } from "@opencode-ai/llm"
+import {
+  LLMClient,
+  LLMError,
+  LLMEvent,
+  Model,
+  TransportReason,
+  type LLMClientShape,
+  type LLMRequest,
+} from "@opencode-ai/llm"
 import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Config } from "@opencode-ai/core/config"
@@ -38,20 +46,25 @@ import { Tool } from "@opencode-ai/core/tool/tool"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { eq } from "drizzle-orm"
-import { Deferred, Effect, Fiber, Layer, LayerMap, Schema, Scope, Stream } from "effect"
+import { Deferred, Duration, Effect, Fiber, Layer, LayerMap, Schema, Scope, Stream } from "effect"
+import { TestConsole } from "effect/testing"
 import { testEffect } from "./lib/effect"
 
 const directory = AbsolutePath.make("/project")
 const requests: LLMRequest[] = []
 let responses: LLMEvent[][] = []
 let toolGate: Deferred.Deferred<void> | undefined
+// Artificial provider latency before a turn's events (or failure) are delivered.
+let streamDelay = Duration.zero
+let streamFailure: LLMError | undefined
 const client = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
     prepare: () => Effect.die("unused"),
     stream: ((request: LLMRequest) => {
       requests.push(request)
-      return Stream.fromIterable(responses.shift() ?? [])
+      const events = streamFailure ? Stream.fail(streamFailure) : Stream.fromIterable(responses.shift() ?? [])
+      return Stream.unwrap(Effect.sleep(streamDelay).pipe(Effect.as(events)))
     }) as unknown as LLMClientShape["stream"],
     generate: () => Effect.die("unused"),
   }),
@@ -145,6 +158,8 @@ const setup = Effect.gen(function* () {
   requests.length = 0
   responses = []
   toolGate = undefined
+  streamDelay = Duration.zero
+  streamFailure = undefined
   const database = yield* Database.Service
   yield* database.db
     .insert(ProjectTable)
@@ -267,6 +282,69 @@ describe("SessionExecutionLocal status events", () => {
       expect(rows).toHaveLength(0)
       expect(SessionEvent.DurableDefinitions).not.toContain(SessionEvent.StatusChanged)
       expect(SessionEvent.Definitions).toContain(SessionEvent.StatusChanged)
+    }),
+  )
+})
+
+describe("SessionV2.resumeDetached", () => {
+  it.live("returns before a slow model turn, which still completes afterward", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const timeline = yield* recordTimeline
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Take your time" }), resume: false })
+      responses = [textStep("Finally")]
+      streamDelay = Duration.millis(500)
+
+      const started = Date.now()
+      yield* session.resumeDetached(sessionID)
+
+      expect(Date.now() - started).toBeLessThan(250)
+      expect(Array.from(yield* session.active)).toEqual([sessionID])
+      expect(yield* session.context(sessionID)).toMatchObject([{ type: "user", text: "Take your time" }])
+
+      // The drain is registered before resumeDetached returns, so `wait` joins it rather than returning early.
+      yield* session.wait(sessionID)
+      expect(Date.now() - started).toBeGreaterThanOrEqual(500)
+      expect(requests).toHaveLength(1)
+      expect(timeline).toEqual(["status:busy", "step.started", "step.ended", "status:idle"])
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", text: "Take your time" },
+        { type: "assistant", finish: "stop", content: [{ type: "text", text: "Finally" }] },
+      ])
+    }),
+  )
+
+  it.live("keeps a failed turn from the caller while the execution owner logs it", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "This will fail" }), resume: false })
+      streamFailure = new LLMError({
+        module: "test",
+        method: "stream",
+        reason: new TransportReason({ message: "Provider unavailable" }),
+      })
+      streamDelay = Duration.millis(200)
+
+      const started = Date.now()
+      const exit = yield* session.resumeDetached(sessionID).pipe(Effect.exit)
+      expect(Date.now() - started).toBeLessThan(100)
+      expect(exit._tag).toBe("Success")
+
+      // `wait` joins the same drain, so it observes the failure that resumeDetached's caller never sees.
+      expect(yield* session.wait(sessionID).pipe(Effect.flip)).toBe(streamFailure)
+      expect(requests).toHaveLength(1)
+      const logged = [...(yield* TestConsole.logLines), ...(yield* TestConsole.errorLines)].map(String).join("\n")
+      expect(logged).toContain("Failed to drain Session")
+      expect(logged).toContain("Provider unavailable")
+    }),
+  )
+
+  it.live("fails only for a missing Session", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const error = yield* session.resumeDetached(SessionV2.ID.make("ses_missing_detached")).pipe(Effect.flip)
+      expect(error).toBeInstanceOf(SessionV2.NotFoundError)
+      expect(requests).toHaveLength(0)
     }),
   )
 })

@@ -294,7 +294,13 @@ export interface Interface {
   readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly wait: (id: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
+  /** Runs the Session to completion, starting a drain while idle or joining the active one; fails with its error. */
   readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
+  /**
+   * Starts or joins the same run as `resume` but returns once it is registered, without waiting for the model
+   * turn. Turn failures never reach the caller; the execution owner logs them. Use `wait` to observe settlement.
+   */
+  readonly resumeDetached: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly interrupt: (sessionID: SessionSchema.ID) => Effect.Effect<void>
   readonly revert: {
     readonly stage: (input: {
@@ -334,6 +340,10 @@ const layer = Layer.effect(
             }),
         ),
       )
+    // Starting immediately registers the drain before this returns, so a following `wait` joins it. Detached so
+    // the drain outlives the caller's scope (e.g. an HTTP request).
+    const resumeDetached = (sessionID: SessionSchema.ID) =>
+      execution.resume(sessionID).pipe(Effect.ignore, Effect.forkDetach({ startImmediately: true }), Effect.asVoid)
 
     const result = Service.of({
       create: Effect.fn("V2Session.create")(function* (input) {
@@ -596,10 +606,8 @@ const layer = Layer.effect(
         )
         yield* end(output)
         if (input.resume !== true) return
-        // `wake` only drains pending input, so answering the shell output needs a forced run. Detached so
-        // the caller is not held for the model turn; the drain is registered before this returns, and
-        // its failures are already logged by the execution owner.
-        yield* execution.resume(session.id).pipe(Effect.ignore, Effect.forkDetach({ startImmediately: true }))
+        // `wake` only drains pending input, so answering the shell output needs a forced run.
+        yield* resumeDetached(session.id)
       }),
       command: Effect.fn("V2Session.command")(function* (input) {
         const session = yield* result.get(input.sessionID)
@@ -687,7 +695,7 @@ const layer = Layer.effect(
               "Summarize the task tool output above and continue with your task.",
             ].join("\n"),
           })
-          yield* execution.resume(session.id).pipe(Effect.ignore, Effect.forkDetach({ startImmediately: true }))
+          yield* resumeDetached(session.id)
           return {
             type: "subtask" as const,
             sessionID: dispatched.sessionID,
@@ -806,6 +814,10 @@ const layer = Layer.effect(
       resume: Effect.fn("V2Session.resume")(function* (sessionID) {
         yield* result.get(sessionID)
         yield* execution.resume(sessionID)
+      }),
+      resumeDetached: Effect.fn("V2Session.resumeDetached")(function* (sessionID) {
+        yield* result.get(sessionID)
+        yield* resumeDetached(sessionID)
       }),
       interrupt: Effect.fn("V2Session.interrupt")((sessionID) =>
         Effect.uninterruptible(execution.interrupt(sessionID)),
