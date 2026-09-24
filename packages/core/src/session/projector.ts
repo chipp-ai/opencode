@@ -356,6 +356,14 @@ const layer = Layer.effectDiscard(
         yield* run(db, event)
       }),
     )
+    yield* events.project(SessionEvent.TitleChanged, (event) =>
+      db
+        .update(SessionTable)
+        .set({ title: event.data.title, time_updated: DateTime.toEpochMillis(event.data.timestamp) })
+        .where(eq(SessionTable.id, event.data.sessionID))
+        .run()
+        .pipe(Effect.orDie, Effect.asVoid),
+    )
     yield* events.project(SessionEvent.Prompted, (event) =>
       Effect.gen(function* () {
         if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")

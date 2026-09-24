@@ -8,7 +8,7 @@ import {
   isContextOverflowFailure,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
-import { Cause, DateTime, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
+import { Cause, DateTime, Effect, FiberSet, Layer, Option, Scope, Semaphore, Stream } from "effect"
 import { AgentV2 } from "../../agent"
 import { Config } from "../../config"
 import { Database } from "../../database/database"
@@ -32,6 +32,7 @@ import { SessionInput } from "../input"
 import { SessionMessage } from "../message"
 import { SessionSchema } from "../schema"
 import { SessionStore } from "../store"
+import { SessionTitle } from "../title"
 import { type RunError, Service } from "./index"
 import { SessionRunnerModel } from "./model"
 import { SessionRunnerFallback } from "./fallback"
@@ -85,7 +86,8 @@ import { llmClient } from "../../effect/app-node-platform"
  * - Post-run maintenance
  *   - [ ] Settle final status and expose durable output events to replayable consumers.
  *   - [ ] Coalesce streamed deltas and add covering projected-history indexes.
- *   - [ ] Update title, summaries, compaction state, and cleanup in bounded background work.
+ *   - [x] Generate the Session title from the first real user message in detached background work.
+ *   - [ ] Update summaries, compaction state, and cleanup in bounded background work.
  *
  * Use `llm.stream(request)` for each provider turn. Keep tool execution and continuation here.
  * Durable continuation recovery remains a separate future slice with an explicit retry policy.
@@ -112,6 +114,8 @@ const layer = Layer.effect(
     const snapshots = yield* Snapshot.Service
     const db = (yield* Database.Service).db
     const compaction = SessionCompaction.make({ events, llm, config: yield* config.entries() })
+    const scope = yield* Scope.Scope
+    const generateTitle = SessionTitle.make({ events, store, llm })
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
@@ -183,6 +187,25 @@ const layer = Layer.effect(
         concurrency: "unbounded",
       }).pipe(Effect.map(SystemContext.combine))
 
+    // Detached so a slow or failing title call never delays or fails the provider turn.
+    const startTitle = (input: Omit<Parameters<typeof generateTitle>[0], "agent">) =>
+      Effect.gen(function* () {
+        const agent = yield* agents.get(AgentV2.ID.make("title"))
+        if (!agent) return
+        const model = agent.model
+          ? yield* models.resolve({ ...input.session, model: agent.model }).pipe(
+              Effect.map((resolved) => resolved.model),
+              Effect.orElseSucceed(() => input.model),
+            )
+          : input.model
+        yield* generateTitle({ ...input, agent, model })
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("failed to generate session title", { "session.id": input.session.id, cause }),
+        ),
+        Effect.forkIn(scope),
+      )
+
     const runTurnAttempt = Effect.fn("SessionRunner.runTurn")(function* (
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
@@ -199,9 +222,9 @@ const layer = Layer.effect(
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
+      let promoted = 0
       if (promotion) {
         const cutoff = yield* EventV2.latestSequence(db, session.id)
-        let promoted = 0
         if (promotion === "steer") promoted = yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
         if (promotion === "queue") {
           promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id))
@@ -236,6 +259,9 @@ const layer = Layer.effect(
         tools: toolMaterialization?.definitions ?? [],
         toolChoice: isLastStep ? "none" : undefined,
       })
+      // Only the turn that promotes the first real user message titles the Session; transition retries never promote.
+      if (promoted > 0 && SessionTitle.eligible(session, context))
+        yield* startTitle({ session, model, context, http: request.http })
       if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))
         return yield* Effect.die(continueAfterCompaction(currentStep))
       const startSnapshot = yield* snapshots.capture()

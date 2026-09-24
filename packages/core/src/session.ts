@@ -33,6 +33,7 @@ import { MessageDecodeError } from "./session/error"
 import { SessionRollup } from "./session/rollup"
 import { SessionEvent } from "./session/event"
 import { SessionInput } from "./session/input"
+import { SessionTitle } from "./session/title"
 import { Snapshot } from "./snapshot"
 import { SessionRevert } from "./session/revert"
 import { Revert } from "@opencode-ai/schema/revert"
@@ -253,7 +254,7 @@ const layer = Layer.effect(
           directory: input.location.directory,
           path: path.relative(project.directory, input.location.directory).replaceAll("\\", "/"),
           workspaceID: input.location.workspaceID ? WorkspaceV2.ID.make(input.location.workspaceID) : undefined,
-          title: `New session - ${new Date(now).toISOString()}`,
+          title: SessionTitle.placeholder(now),
           agent: input.agent,
           parentID: input.parentID,
           model: input.model
