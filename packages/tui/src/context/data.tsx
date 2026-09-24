@@ -247,6 +247,9 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             })
           })
           break
+        case "session.next.message.forked":
+          message.update(event.data.sessionID, (draft) => message.prepend(draft, event.data.message))
+          break
         case "session.next.shell.started":
           message.update(event.data.sessionID, (draft) => {
             message.prepend(draft, {

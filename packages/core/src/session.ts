@@ -98,6 +98,7 @@ type CreateInput = {
   model?: ModelV2.Ref
   location: Location.Ref
   parentID?: SessionSchema.ID
+  title?: string
 }
 
 type CompactInput = {
@@ -282,6 +283,14 @@ export interface Interface {
   /** Publishes this Session to the hosted share service and keeps the shared copy in sync; returns its public URL. */
   readonly share: (sessionID: SessionSchema.ID) => Effect.Effect<{ readonly url: string }, NotFoundError | ShareError>
   readonly unshare: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | ShareError>
+  /**
+   * Copies this Session's messages before `messageID` (all of them when omitted) into a new root Session titled
+   * with a fork suffix. Copies keep their tokens but carry no cost, and add nothing to the fork's usage totals.
+   */
+  readonly fork: (input: {
+    sessionID: SessionSchema.ID
+    messageID?: SessionMessage.ID
+  }) => Effect.Effect<SessionSchema.Info, NotFoundError | MessageNotFoundError | MessageDecodeError>
   readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly wait: (id: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
@@ -347,7 +356,7 @@ const layer = Layer.effect(
           directory: input.location.directory,
           path: path.relative(project.directory, input.location.directory).replaceAll("\\", "/"),
           workspaceID: input.location.workspaceID ? WorkspaceV2.ID.make(input.location.workspaceID) : undefined,
-          title: SessionTitle.placeholder(now),
+          title: input.title ?? SessionTitle.placeholder(now),
           agent: input.agent,
           parentID: input.parentID,
           model: input.model
@@ -397,7 +406,10 @@ const layer = Layer.effect(
           .where(eq(SessionTable.project_id, session.projectID))
           .all()
           .pipe(Effect.orDie)
-        return SessionRollup.rollup(rows.map((row) => fromRow(row)), sessionID)
+        return SessionRollup.rollup(
+          rows.map((row) => fromRow(row)),
+          sessionID,
+        )
       }),
       list: Effect.fn("V2Session.list")(function* (input = {}) {
         const direction = input.anchor?.direction ?? "next"
@@ -610,8 +622,7 @@ const layer = Layer.effect(
               available: (yield* agents.all()).filter((item) => !item.hidden).map((item) => item.id),
             })
           // Matches V1: an agent's own model only wins when the command itself names that agent.
-          const model =
-            command.model ?? (command.agent ? agent.info?.model : undefined) ?? input.model ?? session.model
+          const model = command.model ?? (command.agent ? agent.info?.model : undefined) ?? input.model ?? session.model
           // Fail before anything durable is recorded rather than on the first provider turn.
           if (model) yield* models.resolve({ ...session, model })
           const rendered = CommandV2.render(command.template, input.arguments ?? "")
@@ -715,6 +726,51 @@ const layer = Layer.effect(
         yield* result.get(sessionID)
         yield* sharing.unshare(sessionID).pipe(Effect.mapError((cause) => shareError(sessionID, cause)))
       }),
+      fork: Effect.fn("V2Session.fork")((input) =>
+        // Uninterruptible so an interrupted request never leaves a partially copied fork behind.
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const source = yield* result.get(input.sessionID)
+            const rows = yield* db
+              .select()
+              .from(SessionMessageTable)
+              .where(eq(SessionMessageTable.session_id, source.id))
+              .orderBy(asc(SessionMessageTable.seq))
+              .all()
+              .pipe(Effect.orDie)
+            const cutoff = input.messageID ? rows.findIndex((row) => row.id === input.messageID) : rows.length
+            if (input.messageID && cutoff < 0)
+              return yield* new MessageNotFoundError({ sessionID: source.id, messageID: input.messageID })
+            const messages = yield* Effect.forEach(rows.slice(0, cutoff), decode)
+            // No parentID: that field drives subagent depth, cost rollup, and the parent-session header. Like V1, a fork
+            // is a root Session identified only by its title.
+            const forked = yield* result.create({
+              location: source.location,
+              agent: source.agent,
+              model: source.model,
+              title: forkedTitle(source.title),
+            })
+            yield* Effect.forEach(
+              messages,
+              (message) =>
+                Effect.gen(function* () {
+                  yield* events.publish(SessionEvent.MessageForked, {
+                    sessionID: forked.id,
+                    timestamp: yield* DateTime.now,
+                    message: {
+                      ...message,
+                      id: SessionMessage.ID.create(),
+                      ...(message.type === "assistant" ? { cost: 0 } : {}),
+                      ...(message.type === "synthetic" ? { sessionID: forked.id } : {}),
+                    },
+                  })
+                }),
+              { discard: true },
+            )
+            return yield* result.get(forked.id)
+          }),
+        ),
+      ),
       compact: Effect.fn("V2Session.compact")(function* (input) {
         const session = yield* result.get(input.sessionID)
         yield* Effect.gen(function* () {
@@ -816,6 +872,13 @@ const runShell = (appProcess: AppProcess.Interface, shell: string, command: stri
 
 const shareError = (sessionID: SessionSchema.ID, cause: unknown) =>
   new ShareError({ sessionID, message: cause instanceof Error ? cause.message : String(cause) })
+
+// Matches V1's fork title: "Title" becomes "Title (fork #1)", and "Title (fork #1)" becomes "Title (fork #2)".
+const forkedTitle = (title: string) => {
+  const match = title.match(/^(.+) \(fork #(\d+)\)$/)
+  if (match) return `${match[1]} (fork #${Number(match[2]) + 1})`
+  return `${title} (fork #1)`
+}
 
 const sameModel = (model: ModelV2.Ref, current: ModelV2.Ref | undefined) =>
   current?.providerID === model.providerID &&

@@ -715,6 +715,111 @@ describe("session HttpApi", () => {
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 
+  it.live("forks a v2 session over HTTP with copied history, zero cost, and preserved tokens", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      const directory = yield* tmpdirScoped({ git: true })
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(directory, "opencode.json"),
+          JSON.stringify({
+            providers: {
+              test: {
+                api: { type: "aisdk", package: "@ai-sdk/openai-compatible", url: llm.url, settings: {} },
+                request: { body: { apiKey: "test-key" } },
+                models: {
+                  "test-model": {
+                    limit: { context: 100_000, output: 10_000 },
+                    cost: { input: 3, output: 15, cache: { read: 0, write: 0 } },
+                  },
+                },
+              },
+            },
+          }),
+        ),
+      )
+      const headers = { "x-opencode-directory": directory }
+      const json = { ...headers, "content-type": "application/json" }
+      const created = yield* requestJson<{ data: { id: string } }>("/api/session", {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ model: { providerID: "test", id: "test-model" }, location: { directory } }),
+      })
+      const sessionID = created.data.id
+      yield* pollWithTimeout(
+        requestJson<{ data: { id: string }[] }>("/api/provider", { headers }).pipe(
+          Effect.map(({ data }) => data.find((provider) => provider.id === "test")),
+        ),
+        "configured test provider never reached the V2 catalog",
+      )
+      const turn = (text: string, answer: string) =>
+        Effect.gen(function* () {
+          yield* llm.text(answer, { usage: { input: 1_000, output: 200 } })
+          yield* request(`/api/session/${sessionID}/prompt`, {
+            method: "POST",
+            headers: json,
+            body: JSON.stringify({ prompt: { text } }),
+          })
+          expect((yield* request(`/api/session/${sessionID}/wait`, { method: "POST", headers })).status).toBe(204)
+        })
+      yield* turn("first question", "first answer")
+      yield* turn("second question", "second answer")
+      const source = yield* requestJson<{ data: SessionMessage.Message[] }>(
+        `/api/session/${sessionID}/message?order=asc`,
+        { headers },
+      )
+      const conversation = source.data.filter((message) => message.type === "user" || message.type === "assistant")
+      expect(conversation.map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
+      const sourceAssistant = conversation[1]
+      expect(sourceAssistant.type === "assistant" && sourceAssistant.cost).toBeGreaterThan(0)
+
+      const full = yield* requestJson<{ data: { id: string; title: string; parentID?: string; cost: number } }>(
+        `/api/session/${sessionID}/fork`,
+        { method: "POST", headers: json, body: JSON.stringify({}) },
+      )
+      expect(full.data.id).not.toBe(sessionID)
+      expect(full.data.parentID).toBeUndefined()
+      expect(full.data.title).toEndWith(" (fork #1)")
+      expect(full.data.cost).toBe(0)
+      const copied = yield* requestJson<{ data: SessionMessage.Message[] }>(
+        `/api/session/${full.data.id}/message?order=asc`,
+        { headers },
+      )
+      expect(copied.data.map((message) => message.type)).toEqual(source.data.map((message) => message.type))
+      const copiedAssistant = copied.data.find((message) => message.type === "assistant")
+      expect(copiedAssistant).toMatchObject({ cost: 0 })
+      expect(copiedAssistant?.type === "assistant" && copiedAssistant.tokens).toEqual(
+        sourceAssistant.type === "assistant" && sourceAssistant.tokens,
+      )
+
+      const partial = yield* requestJson<{ data: { id: string } }>(`/api/session/${sessionID}/fork`, {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ messageID: conversation[2].id }),
+      })
+      const partialMessages = yield* requestJson<{ data: SessionMessage.Message[] }>(
+        `/api/session/${partial.data.id}/message?order=asc`,
+        { headers },
+      )
+      expect(partialMessages.data.filter((message) => message.type === "user").map((message) => message.text)).toEqual(
+        ["first question"],
+      )
+
+      const missingMessage = yield* request(`/api/session/${sessionID}/fork`, {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ messageID: "msg_missing" }),
+      })
+      expect(missingMessage.status).toBe(404)
+      const missingSession = yield* request(`/api/session/${SessionID.descending()}/fork`, {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({}),
+      })
+      expect(missingSession.status).toBe(404)
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
+
   it.live("runs a user shell command in a v2 session end-to-end", () =>
     Effect.gen(function* () {
       const llm = yield* TestLLMServer

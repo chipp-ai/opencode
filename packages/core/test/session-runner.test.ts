@@ -107,9 +107,11 @@ const client = Layer.succeed(
 )
 const model = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route })
 const replacementModel = Model.make({ id: "replacement", provider: "fake", route: OpenAIChat.route })
+// Per-million-token rates for the resolved model; empty (free) unless a test needs real billed cost.
+let modelCost: ModelV2.Info["cost"] = []
 const resolved = (selected: Model) => ({
   model: selected,
-  info: ModelV2.Info.empty(ProviderV2.ID.make(selected.provider), ModelV2.ID.make(selected.id)),
+  info: { ...ModelV2.Info.empty(ProviderV2.ID.make(selected.provider), ModelV2.ID.make(selected.id)), cost: modelCost },
 })
 const compactModel = Model.make({
   id: "compact",
@@ -351,6 +353,7 @@ const setup = Effect.gen(function* () {
   systemLoadHook = Effect.void
   modelResolveHook = Effect.void
   currentModel = model
+  modelCost = []
   skillBaselines.clear()
   responses = undefined
   streamFailure = undefined
@@ -4305,6 +4308,253 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.resume(sessionID).pipe(Effect.catchDefect(Effect.succeed))).toBe(
         "Tool input delta before start: call-1",
       )
+    }),
+  )
+})
+
+describe("SessionV2.fork", () => {
+  // Billed at $3 / $15 per million input/output tokens, so every source answer carries real, non-zero cost.
+  const billed = [{ input: 3, output: 15, cache: { read: 0, write: 0 } }]
+  const expectedCost = (1_000 * 3 + 200 * 15) / 1_000_000
+  const zeroTokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+  const answer = (id: string, text: string) => [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.textStart({ id }),
+    LLMEvent.textDelta({ id, text }),
+    LLMEvent.textEnd({ id }),
+    LLMEvent.stepFinish({
+      index: 0,
+      reason: "stop",
+      usage: { inputTokens: 1_000, nonCachedInputTokens: 1_000, outputTokens: 200 },
+    }),
+    LLMEvent.finish({ reason: "stop" }),
+  ]
+  const converse = (session: SessionV2.Interface, id: SessionV2.ID, turns: ReadonlyArray<readonly [string, string]>) =>
+    Effect.forEach(
+      turns,
+      ([question, reply], index) =>
+        Effect.gen(function* () {
+          response = answer(`text-${id}-${index}`, reply)
+          yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: question }), resume: false })
+          yield* session.resume(id)
+        }),
+      { discard: true },
+    )
+  const ordered = (session: SessionV2.Interface, id: SessionV2.ID) => session.messages({ sessionID: id, order: "asc" })
+  // Content equality independent of the fresh IDs and the fork-adjusted cost.
+  const content = (message: SessionMessage.Message) => {
+    const { id: _, ...rest } = message
+    return rest.type === "assistant" ? { ...rest, cost: undefined } : rest
+  }
+
+  it.effect("copies every message into a new root Session with fresh IDs and a fork title", () =>
+    Effect.gen(function* () {
+      yield* setup
+      modelCost = billed
+      const session = yield* SessionV2.Service
+      yield* converse(session, sessionID, [
+        ["First question", "First answer"],
+        ["Second question", "Second answer"],
+      ])
+      const source = yield* ordered(session, sessionID)
+      expect(source.map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
+
+      const forked = yield* session.fork({ sessionID })
+
+      expect(forked.id).not.toBe(sessionID)
+      expect(forked.parentID).toBeUndefined()
+      expect(forked.title).toBe("test (fork #1)")
+      const copied = yield* ordered(session, forked.id)
+      expect(copied.map(content)).toEqual(source.map(content))
+      const sourceIDs = new Set(source.map((message) => message.id))
+      expect(copied.some((message) => sourceIDs.has(message.id))).toBe(false)
+      // The source is untouched.
+      expect(yield* ordered(session, sessionID)).toEqual(source)
+
+      expect((yield* session.fork({ sessionID: forked.id })).title).toBe("test (fork #2)")
+    }),
+  )
+
+  it.effect("zeroes copied cost but keeps tokens, and adds nothing to either Session's rollup", () =>
+    Effect.gen(function* () {
+      yield* setup
+      modelCost = billed
+      const session = yield* SessionV2.Service
+      yield* converse(session, sessionID, [["Question", "Answer"]])
+      const sourceAssistant = (yield* ordered(session, sessionID)).find((message) => message.type === "assistant")
+      expect(sourceAssistant).toMatchObject({ cost: expectedCost, tokens: { input: 1_000, output: 200 } })
+      const sourceBefore = yield* session.cost(sessionID)
+      expect(sourceBefore.cost).toBeCloseTo(expectedCost)
+
+      const forked = yield* session.fork({ sessionID })
+
+      const copiedAssistant = (yield* ordered(session, forked.id)).find((message) => message.type === "assistant")
+      expect(copiedAssistant).toMatchObject({ type: "assistant", cost: 0 })
+      expect(copiedAssistant?.type === "assistant" && copiedAssistant.tokens).toEqual(
+        sourceAssistant?.type === "assistant" && sourceAssistant.tokens,
+      )
+      // The projected Session totals are what SessionRollup reads; the copy must not be billed or counted again.
+      expect(yield* session.get(forked.id)).toMatchObject({ cost: 0, tokens: zeroTokens })
+      expect(yield* session.cost(forked.id)).toEqual({
+        cost: 0,
+        tokens: zeroTokens,
+        subagents: { cost: 0, tokens: zeroTokens },
+      })
+      // Without a parentID the fork is not a subagent of its source, so the source's rollup is unchanged.
+      expect(yield* session.cost(sessionID)).toEqual(sourceBefore)
+
+      // A new turn in the fork is billed to the fork alone.
+      yield* converse(session, forked.id, [["Fork question", "Fork answer"]])
+      const after = yield* session.get(forked.id)
+      expect(after.cost).toBeCloseTo(expectedCost)
+      expect(after.tokens).toMatchObject({ input: 1_000, output: 200 })
+      expect(yield* session.cost(sessionID)).toEqual(sourceBefore)
+    }),
+  )
+
+  it.effect("copies only the messages before an explicit messageID", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* converse(session, sessionID, [
+        ["First question", "First answer"],
+        ["Second question", "Second answer"],
+      ])
+      const source = yield* ordered(session, sessionID)
+
+      const forked = yield* session.fork({ sessionID, messageID: source[2].id })
+
+      expect((yield* ordered(session, forked.id)).map(content)).toEqual(source.slice(0, 2).map(content))
+      const empty = yield* session.fork({ sessionID, messageID: source[0].id })
+      expect(yield* ordered(session, empty.id)).toEqual([])
+
+      const missing = SessionMessage.ID.make("msg_fork_missing")
+      expect(yield* session.fork({ sessionID, messageID: missing }).pipe(Effect.flip)).toEqual(
+        new SessionV2.MessageNotFoundError({ sessionID, messageID: missing }),
+      )
+      const unknown = SessionV2.ID.make("ses_fork_missing")
+      expect(yield* session.fork({ sessionID: unknown }).pipe(Effect.flip)).toEqual(
+        new SessionV2.NotFoundError({ sessionID: unknown }),
+      )
+    }),
+  )
+
+  it.effect("rebuilds the fork entirely from its own event log after its source is gone", () =>
+    Effect.gen(function* () {
+      yield* setup
+      modelCost = billed
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* converse(session, sessionID, [
+        ["First question", "First answer"],
+        ["Second question", "Second answer"],
+      ])
+      const forked = yield* session.fork({ sessionID })
+      const messages = yield* ordered(session, forked.id)
+      const info = yield* session.get(forked.id)
+      const recorded = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, forked.id))
+        .orderBy(asc(EventTable.seq))
+        .all()
+        .pipe(Effect.orDie)
+      expect(recorded.map((event) => event.type)).toEqual([
+        "session.created.1",
+        ...messages.map(() => EventV2.versionedType(SessionEvent.MessageForked.type, 1)),
+      ])
+
+      // Drop the source entirely, then tear down every projection of the fork and replay only its own log.
+      yield* events.remove(sessionID)
+      yield* db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
+      yield* events.remove(forked.id)
+      yield* db.delete(SessionTable).where(eq(SessionTable.id, forked.id)).run().pipe(Effect.orDie)
+      expect(yield* db.select().from(SessionMessageTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(yield* session.get(forked.id).pipe(Effect.flip)).toBeInstanceOf(SessionV2.NotFoundError)
+
+      yield* events.replayAll(
+        recorded.map((event) => ({
+          id: event.id,
+          aggregateID: event.aggregate_id,
+          seq: event.seq,
+          type: event.type,
+          data: event.data,
+        })),
+      )
+
+      expect(yield* ordered(session, forked.id)).toEqual(messages)
+      const rebuilt = yield* session.get(forked.id)
+      expect(rebuilt).toMatchObject({ title: info.title, cost: 0, tokens: zeroTokens })
+      expect(rebuilt.parentID).toBeUndefined()
+    }),
+  )
+
+  it.effect("continues from a copied compaction without re-summarizing the history it covers", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      yield* converse(session, sessionID, [["Pre-compaction question", "Pre-compaction answer"]])
+      const compactionID = SessionMessage.ID.create()
+      yield* events.publish(SessionEvent.Compaction.Started, {
+        sessionID,
+        messageID: compactionID,
+        timestamp: DateTime.makeUnsafe(1),
+        reason: "manual",
+      })
+      yield* events.publish(SessionEvent.Compaction.Ended, {
+        sessionID,
+        messageID: compactionID,
+        timestamp: DateTime.makeUnsafe(2),
+        reason: "manual",
+        text: "Summary of earlier work",
+        recent: "",
+      })
+      yield* converse(session, sessionID, [["Post-compaction question", "Post-compaction answer"]])
+
+      const forked = yield* session.fork({ sessionID })
+      expect((yield* session.context(forked.id)).map((message) => message.type)).toEqual([
+        "compaction",
+        "user",
+        "assistant",
+      ])
+
+      requests.length = 0
+      yield* converse(session, forked.id, [["Fork question", "Fork answer"]])
+
+      // One provider turn and no summarization call: the copied compaction is the fork's history boundary.
+      expect(requests).toHaveLength(1)
+      const users = userTexts(requests[0]).join("\n")
+      expect(users).toContain("<summary>\nSummary of earlier work\n</summary>")
+      expect(users).toContain("Post-compaction question")
+      expect(users).toContain("Fork question")
+      expect(users).not.toContain("Pre-compaction question")
+      expect(requests[0].system.map((part) => part.text)).toEqual(["Initial context"])
+    }),
+  )
+
+  it.effect("keeps a fork's totals at zero when a revert removes copied messages", () =>
+    Effect.gen(function* () {
+      yield* setup
+      modelCost = billed
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      yield* converse(session, sessionID, [
+        ["First question", "First answer"],
+        ["Second question", "Second answer"],
+      ])
+      const forked = yield* session.fork({ sessionID })
+      const copied = yield* ordered(session, forked.id)
+
+      yield* events.publish(SessionEvent.RevertEvent.Committed, {
+        sessionID: forked.id,
+        timestamp: DateTime.makeUnsafe(3),
+        messageID: copied[0].id,
+      })
+
+      expect((yield* ordered(session, forked.id)).map((message) => message.id)).toEqual([copied[0].id])
+      expect(yield* session.get(forked.id)).toMatchObject({ cost: 0, tokens: zeroTokens })
     }),
   )
 })

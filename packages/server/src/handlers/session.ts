@@ -358,6 +358,37 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         }),
       )
       .handle(
+        "session.fork",
+        Effect.fn(function* (ctx) {
+          return {
+            data: yield* session.fork({ sessionID: ctx.params.sessionID, messageID: ctx.payload.messageID }).pipe(
+              Effect.catchTags({
+                "Session.NotFoundError": inputErrors["Session.NotFoundError"],
+                "Session.MessageNotFoundError": (error) =>
+                  Effect.fail(
+                    new MessageNotFoundError({
+                      sessionID: error.sessionID,
+                      messageID: error.messageID,
+                      message: `Message not found: ${error.messageID}`,
+                    }),
+                  ),
+                "Session.MessageDecodeError": (error) => {
+                  const ref = `err_${crypto.randomUUID().slice(0, 8)}`
+                  return Effect.logError("failed to decode session message while forking").pipe(
+                    Effect.annotateLogs({ ref, sessionID: error.sessionID, messageID: error.messageID }),
+                    Effect.andThen(
+                      Effect.fail(
+                        new UnknownError({ message: "Unexpected server error. Check server logs for details.", ref }),
+                      ),
+                    ),
+                  )
+                },
+              }),
+            ),
+          }
+        }),
+      )
+      .handle(
         "session.wait",
         Effect.fn(function* (ctx) {
           yield* session.wait(ctx.params.sessionID).pipe(

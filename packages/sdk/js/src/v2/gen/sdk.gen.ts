@@ -348,6 +348,8 @@ import type {
   V2SessionCreateResponses,
   V2SessionEventsErrors,
   V2SessionEventsResponses,
+  V2SessionForkErrors,
+  V2SessionForkResponses,
   V2SessionGetErrors,
   V2SessionGetResponses,
   V2SessionHistoryErrors,
@@ -5933,6 +5935,41 @@ export class Session3 extends HeyApiClient {
       url: "/api/session/{sessionID}/share",
       ...options,
       ...params,
+    })
+  }
+
+  /**
+   * Fork session
+   *
+   * Create a new session holding a copy of this session's messages before messageID, or all of them when omitted. The copies keep their token counts but carry no cost.
+   */
+  public fork<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      messageID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "body", key: "messageID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<V2SessionForkResponses, V2SessionForkErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/fork",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
     })
   }
 

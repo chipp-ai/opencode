@@ -21,13 +21,7 @@ import { Locale } from "./locale"
 import { name } from "./model"
 
 /** Session palette commands that depend on V1-only endpoints or V1 message data, with no V2 path in the TUI yet. */
-export const V2_UNAVAILABLE_COMMANDS = new Set([
-  "session.fork",
-  "session.timeline",
-  "session.compact",
-  "session.undo",
-  "session.redo",
-])
+export const V2_UNAVAILABLE_COMMANDS = new Set(["session.timeline", "session.compact", "session.undo", "session.redo"])
 
 export function v2UnavailableMessage(feature: string) {
   return `${feature} is not available in V2 mode yet`

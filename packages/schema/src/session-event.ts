@@ -153,6 +153,20 @@ export const Synthetic = Event.define({
 })
 export type Synthetic = typeof Synthetic.Type
 
+/**
+ * Appends one already-decided message copied from another Session by a fork. The payload is the final
+ * projected message (fresh ID, fork-adjusted usage), not the construction events that originally built it.
+ */
+export const MessageForked = Event.define({
+  type: "session.next.message.forked",
+  ...options,
+  schema: {
+    ...Base,
+    message: SessionMessage.Message,
+  },
+})
+export type MessageForked = typeof MessageForked.Type
+
 export namespace Shell {
   export const Started = Event.define({
     type: "session.next.shell.started",
@@ -493,6 +507,7 @@ export const DurableDefinitions = Event.inventory(
   PromptRevised,
   ContextUpdated,
   Synthetic,
+  MessageForked,
   Shell.Started,
   Shell.Ended,
   Step.Started,
@@ -527,6 +542,7 @@ export const Definitions = Event.inventory(
   PromptRevised,
   ContextUpdated,
   Synthetic,
+  MessageForked,
   Shell.Started,
   Shell.Ended,
   Step.Started,

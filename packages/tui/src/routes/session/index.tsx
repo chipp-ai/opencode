@@ -745,6 +745,9 @@ export function Session() {
               if (child) scroll.scrollBy(child.y - scroll.y - 1)
             }}
             sessionID={route.sessionID}
+            v2={v2()}
+            messages={messages()}
+            partsFor={partsFor}
           />
         ))
       },

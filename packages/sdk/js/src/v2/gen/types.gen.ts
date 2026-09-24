@@ -26,6 +26,7 @@ export type Event =
   | EventSessionNextPromptRevised
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
+  | EventSessionNextMessageForked
   | EventSessionNextShellStarted
   | EventSessionNextShellEnded
   | EventSessionNextStepStarted
@@ -926,6 +927,15 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.message.forked"
+        properties: {
+          timestamp: number
+          sessionID: string
+          message: SessionMessage
+        }
+      }
+    | {
+        id: string
         type: "session.next.shell.started"
         properties: {
           timestamp: number
@@ -1654,6 +1664,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextPromptRevised
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
+    | SyncEventSessionNextMessageForked
     | SyncEventSessionNextShellStarted
     | SyncEventSessionNextShellEnded
     | SyncEventSessionNextStepStarted
@@ -2809,6 +2820,7 @@ export type SessionDurableEvent =
   | SessionNextPromptRevised
   | SessionNextContextUpdated
   | SessionNextSynthetic
+  | SessionNextMessageForked
   | SessionNextShellStarted
   | SessionNextShellEnded
   | SessionNextStepStarted
@@ -2965,6 +2977,7 @@ export type V2Event =
   | SessionNextPromptRevised
   | SessionNextContextUpdated
   | SessionNextSynthetic
+  | SessionNextMessageForked
   | SessionNextShellStarted
   | SessionNextShellEnded
   | SessionNextStepStarted
@@ -3178,20 +3191,113 @@ export type PromptFormat = {
   }
 }
 
-export type SessionErrorStructuredOutput = {
-  type: "structured_output"
-  message: string
+export type SessionMessageAgentSwitched = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+  }
+  type: "agent-switched"
+  agent: string
 }
 
-export type SessionErrorUnknown = {
-  type: "unknown"
-  message: string
+export type SessionMessageModelSwitched = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+  }
+  type: "model-switched"
+  model: ModelRef
+}
+
+export type SessionMessageUser = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+  }
+  text: string
+  files?: Array<PromptFileAttachment>
+  agents?: Array<PromptAgentAttachment>
+  format?: PromptFormat
+  agentOverride?: string
+  modelOverride?: ModelRef
+  type: "user"
+}
+
+export type SessionMessageSynthetic = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+  }
+  sessionID: string
+  text: string
+  type: "synthetic"
+}
+
+export type SessionMessageSystem = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+  }
+  type: "system"
+  text: string
+}
+
+export type SessionMessageShell = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+    completed?: number
+  }
+  type: "shell"
+  callID: string
+  command: string
+  output: string
+}
+
+export type SessionMessageAssistantText = {
+  type: "text"
+  id: string
+  text: string
 }
 
 export type LlmProviderMetadata = {
   [key: string]: {
     [key: string]: unknown
   }
+}
+
+export type SessionMessageAssistantReasoning = {
+  type: "reasoning"
+  id: string
+  text: string
+  providerMetadata?: LlmProviderMetadata
+  time?: {
+    created: number
+    completed?: number
+  }
+}
+
+export type SessionMessageToolStatePending = {
+  status: "pending"
+  input: string
 }
 
 export type ToolTextContent = {
@@ -3207,6 +3313,135 @@ export type ToolFileContent = {
 }
 
 export type LlmToolContent = ToolTextContent | ToolFileContent
+
+export type SessionMessageToolStateRunning = {
+  status: "running"
+  input: {
+    [key: string]: unknown
+  }
+  structured: {
+    [key: string]: unknown
+  }
+  content: Array<LlmToolContent>
+}
+
+export type SessionMessageToolStateCompleted = {
+  status: "completed"
+  input: {
+    [key: string]: unknown
+  }
+  attachments?: Array<PromptFileAttachment>
+  content: Array<LlmToolContent>
+  outputPaths?: Array<string>
+  structured: {
+    [key: string]: unknown
+  }
+  result?: unknown
+}
+
+export type SessionErrorUnknown = {
+  type: "unknown"
+  message: string
+}
+
+export type SessionMessageToolStateError = {
+  status: "error"
+  input: {
+    [key: string]: unknown
+  }
+  content: Array<LlmToolContent>
+  structured: {
+    [key: string]: unknown
+  }
+  error: SessionErrorUnknown
+  result?: unknown
+}
+
+export type SessionMessageAssistantTool = {
+  type: "tool"
+  id: string
+  name: string
+  provider?: {
+    executed: boolean
+    metadata?: LlmProviderMetadata
+    resultMetadata?: LlmProviderMetadata
+  }
+  state:
+    | SessionMessageToolStatePending
+    | SessionMessageToolStateRunning
+    | SessionMessageToolStateCompleted
+    | SessionMessageToolStateError
+  time: {
+    created: number
+    ran?: number
+    completed?: number
+    pruned?: number
+  }
+}
+
+export type SessionErrorStructuredOutput = {
+  type: "structured_output"
+  message: string
+}
+
+export type SessionError2 = SessionErrorUnknown | SessionErrorStructuredOutput
+
+export type SessionMessageAssistant = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+    completed?: number
+  }
+  type: "assistant"
+  agent: string
+  model: ModelRef
+  content: Array<SessionMessageAssistantText | SessionMessageAssistantReasoning | SessionMessageAssistantTool>
+  snapshot?: {
+    start?: string
+    end?: string
+    files?: Array<string>
+  }
+  finish?: string
+  cost?: number
+  tokens?: {
+    input: number
+    output: number
+    reasoning: number
+    cache: {
+      read: number
+      write: number
+    }
+  }
+  structured?: unknown
+  error?: SessionError2
+}
+
+export type SessionMessageCompaction = {
+  type: "compaction"
+  reason: "auto" | "manual"
+  summary: string
+  recent: string
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    created: number
+  }
+}
+
+export type SessionMessage =
+  | SessionMessageAgentSwitched
+  | SessionMessageModelSwitched
+  | SessionMessageUser
+  | SessionMessageSynthetic
+  | SessionMessageSystem
+  | SessionMessageShell
+  | SessionMessageAssistant
+  | SessionMessageCompaction
 
 export type SessionNextRetryError = {
   message: string
@@ -3582,6 +3817,22 @@ export type SyncEventSessionNextSynthetic = {
       sessionID: string
       messageID: string
       text: string
+    }
+  }
+}
+
+export type SyncEventSessionNextMessageForked = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.message.forked.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      message: SessionMessage
     }
   }
 }
@@ -4132,228 +4383,6 @@ export type SessionInputAdmitted = {
   withdrawnSeq?: number
 }
 
-export type SessionMessageAgentSwitched = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    created: number
-  }
-  type: "agent-switched"
-  agent: string
-}
-
-export type SessionMessageModelSwitched = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    created: number
-  }
-  type: "model-switched"
-  model: ModelRef
-}
-
-export type SessionMessageUser = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    created: number
-  }
-  text: string
-  files?: Array<PromptFileAttachment>
-  agents?: Array<PromptAgentAttachment>
-  format?: PromptFormat
-  agentOverride?: string
-  modelOverride?: ModelRef
-  type: "user"
-}
-
-export type SessionMessageSynthetic = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    created: number
-  }
-  sessionID: string
-  text: string
-  type: "synthetic"
-}
-
-export type SessionMessageSystem = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    created: number
-  }
-  type: "system"
-  text: string
-}
-
-export type SessionMessageShell = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    created: number
-    completed?: number
-  }
-  type: "shell"
-  callID: string
-  command: string
-  output: string
-}
-
-export type SessionMessageAssistantText = {
-  type: "text"
-  id: string
-  text: string
-}
-
-export type SessionMessageAssistantReasoning = {
-  type: "reasoning"
-  id: string
-  text: string
-  providerMetadata?: LlmProviderMetadata
-  time?: {
-    created: number
-    completed?: number
-  }
-}
-
-export type SessionMessageToolStatePending = {
-  status: "pending"
-  input: string
-}
-
-export type SessionMessageToolStateRunning = {
-  status: "running"
-  input: {
-    [key: string]: unknown
-  }
-  structured: {
-    [key: string]: unknown
-  }
-  content: Array<LlmToolContent>
-}
-
-export type SessionMessageToolStateCompleted = {
-  status: "completed"
-  input: {
-    [key: string]: unknown
-  }
-  attachments?: Array<PromptFileAttachment>
-  content: Array<LlmToolContent>
-  outputPaths?: Array<string>
-  structured: {
-    [key: string]: unknown
-  }
-  result?: unknown
-}
-
-export type SessionMessageToolStateError = {
-  status: "error"
-  input: {
-    [key: string]: unknown
-  }
-  content: Array<LlmToolContent>
-  structured: {
-    [key: string]: unknown
-  }
-  error: SessionErrorUnknown
-  result?: unknown
-}
-
-export type SessionMessageAssistantTool = {
-  type: "tool"
-  id: string
-  name: string
-  provider?: {
-    executed: boolean
-    metadata?: LlmProviderMetadata
-    resultMetadata?: LlmProviderMetadata
-  }
-  state:
-    | SessionMessageToolStatePending
-    | SessionMessageToolStateRunning
-    | SessionMessageToolStateCompleted
-    | SessionMessageToolStateError
-  time: {
-    created: number
-    ran?: number
-    completed?: number
-    pruned?: number
-  }
-}
-
-export type SessionError2 = SessionErrorUnknown | SessionErrorStructuredOutput
-
-export type SessionMessageAssistant = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    created: number
-    completed?: number
-  }
-  type: "assistant"
-  agent: string
-  model: ModelRef
-  content: Array<SessionMessageAssistantText | SessionMessageAssistantReasoning | SessionMessageAssistantTool>
-  snapshot?: {
-    start?: string
-    end?: string
-    files?: Array<string>
-  }
-  finish?: string
-  cost?: number
-  tokens?: {
-    input: number
-    output: number
-    reasoning: number
-    cache: {
-      read: number
-      write: number
-    }
-  }
-  structured?: unknown
-  error?: SessionError2
-}
-
-export type SessionMessageCompaction = {
-  type: "compaction"
-  reason: "auto" | "manual"
-  summary: string
-  recent: string
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    created: number
-  }
-}
-
-export type SessionMessage =
-  | SessionMessageAgentSwitched
-  | SessionMessageModelSwitched
-  | SessionMessageUser
-  | SessionMessageSynthetic
-  | SessionMessageSystem
-  | SessionMessageShell
-  | SessionMessageAssistant
-  | SessionMessageCompaction
-
 export type SessionNextAgentSwitched = {
   id: string
   metadata?: {
@@ -4551,6 +4580,25 @@ export type SessionNextSynthetic = {
     sessionID: string
     messageID: string
     text: string
+  }
+}
+
+export type SessionNextMessageForked = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.message.forked"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    message: SessionMessage
   }
 }
 
@@ -6601,6 +6649,16 @@ export type EventSessionNextSynthetic = {
     sessionID: string
     messageID: string
     text: string
+  }
+}
+
+export type EventSessionNextMessageForked = {
+  id: string
+  type: "session.next.message.forked"
+  properties: {
+    timestamp: number
+    sessionID: string
+    message: SessionMessage
   }
 }
 
@@ -12249,6 +12307,49 @@ export type V2SessionShareResponses = {
 }
 
 export type V2SessionShareResponse = V2SessionShareResponses[keyof V2SessionShareResponses]
+
+export type V2SessionForkData = {
+  body: {
+    messageID?: string
+  }
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/fork"
+}
+
+export type V2SessionForkErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError | MessageNotFoundError
+   */
+  404: MessageNotFoundError | SessionNotFoundError
+  /**
+   * UnknownError
+   */
+  500: UnknownError1
+}
+
+export type V2SessionForkError = V2SessionForkErrors[keyof V2SessionForkErrors]
+
+export type V2SessionForkResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: SessionV2Info
+  }
+}
+
+export type V2SessionForkResponse = V2SessionForkResponses[keyof V2SessionForkResponses]
 
 export type V2SessionWaitData = {
   body?: never

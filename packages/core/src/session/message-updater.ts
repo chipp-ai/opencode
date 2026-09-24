@@ -162,6 +162,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }),
         )
       },
+      "session.next.message.forked": (event) => adapter.appendMessage(event.data.message),
       "session.next.shell.started": (event) => {
         return adapter.appendMessage(
           SessionMessage.Shell.make({

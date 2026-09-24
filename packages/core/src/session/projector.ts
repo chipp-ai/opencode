@@ -13,6 +13,7 @@ import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
+import { EventTable } from "../event/sql"
 import type { DeepMutable } from "../schema"
 
 type DatabaseService = Database.Interface["db"]
@@ -410,6 +411,9 @@ const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionEvent.ContextUpdated, (event) => run(db, event))
     yield* events.project(SessionEvent.Synthetic, (event) => run(db, event))
+    // A forked copy keeps its tokens for context sizing but never adds usage to the fork's totals, matching
+    // V1's fork: the source Session already accounted for it.
+    yield* events.project(SessionEvent.MessageForked, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))
@@ -494,8 +498,24 @@ const layer = Layer.effectDiscard(
           )
           .all()
           .pipe(Effect.orDie)
+        // Forked copies never added usage (see MessageForked), so subtracting their preserved tokens would
+        // drive the fork's totals negative.
+        const forked = new Set(
+          (yield* db
+            .select({ seq: EventTable.seq })
+            .from(EventTable)
+            .where(
+              and(
+                eq(EventTable.aggregate_id, event.data.sessionID),
+                eq(EventTable.type, EventV2.versionedType(SessionEvent.MessageForked.type, 1)),
+                gt(EventTable.seq, boundary.seq),
+              ),
+            )
+            .all()
+            .pipe(Effect.orDie)).map((row) => row.seq),
+        )
         for (const row of removed) {
-          const prior = messageUsage(decodeRow(row))
+          const prior = forked.has(row.seq) ? undefined : messageUsage(decodeRow(row))
           if (prior) yield* applyUsage(db, event.data.sessionID, prior, -1)
         }
         yield* db

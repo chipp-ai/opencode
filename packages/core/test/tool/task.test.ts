@@ -401,6 +401,41 @@ describe("V2 task tool", () => {
   )
 })
 
+describe("V2 task tool from a forked session", () => {
+  const it = itWith(allowingPermission)
+
+  it.live("treats a fork as a root session, not a subagent of its source", () =>
+    Effect.gen(function* () {
+      const session = yield* setup()
+      const forked = yield* session.fork({ sessionID })
+      yield* session.prompt({ sessionID: forked.id, prompt: Prompt.make({ text: "Explore" }), resume: false })
+      script(primary.id, toolCall("task", { description: "explore", prompt: "look around", subagent_type: "explorer" }))
+      script(explorerModel.id, text("Explorer subagent result."))
+      script(primary.id, text("Got the explorer's result."))
+
+      yield* session.resume(forked.id)
+
+      const { db } = yield* Database.Service
+      // The fork is at depth 0, so its task call dispatched a real child rather than hitting the depth guard.
+      const children = yield* db
+        .select()
+        .from(SessionTable)
+        .where(eq(SessionTable.parent_id, forked.id))
+        .all()
+        .pipe(Effect.orDie)
+      expect(children).toHaveLength(1)
+      expect(calls).toContain(explorerModel.id)
+      // Nothing is recorded as a child of the source, so its depth and rollup are unaffected by the fork.
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.parent_id, sessionID)).all().pipe(Effect.orDie),
+      ).toEqual([])
+      const rollup = yield* session.cost(sessionID)
+      expect(rollup.subagents.cost).toBe(0)
+      expect(rollup.subagents.tokens.input).toBe(0)
+    }),
+  )
+})
+
 describe("V2 task tool permissions", () => {
   itWith(denyingPermission("task")).effect("respects a denied task permission", () =>
     Effect.gen(function* () {
