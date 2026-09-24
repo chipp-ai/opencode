@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Queue } from "effect"
 import { SessionRunCoordinator } from "@opencode-ai/core/session/run-coordinator"
 import { testEffect } from "./lib/effect"
 
@@ -498,6 +498,133 @@ describe("SessionRunCoordinator", () => {
         yield* coordinator.join("session")
 
         expect(forces).toEqual([false])
+      }),
+    ),
+  )
+})
+
+describe("SessionRunCoordinator lifecycle hooks", () => {
+  const recordTransitions = Effect.gen(function* () {
+    const transitions = yield* Queue.unbounded<string>()
+    return {
+      transitions,
+      hooks: {
+        onActive: (key: string) => Queue.offer(transitions, `${key}:active`).pipe(Effect.asVoid),
+        onIdle: (key: string) => Queue.offer(transitions, `${key}:idle`).pipe(Effect.asVoid),
+      },
+      // Hooks run on the coordinator's own fiber, so wait for each transition rather than draining a snapshot.
+      take: (count: number) => Effect.replicateEffect(Queue.take(transitions), count),
+    }
+  })
+
+  it.effect("reports one active and one idle transition for a run", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const recorder = yield* recordTransitions
+        const gate = yield* Deferred.make<void>()
+        const coordinator = yield* SessionRunCoordinator.make({ drain: () => Deferred.await(gate), ...recorder.hooks })
+
+        const resumed = yield* coordinator.run("session").pipe(Effect.forkChild)
+        expect(yield* recorder.take(1)).toEqual(["session:active"])
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.join(resumed)
+
+        expect(yield* recorder.take(1)).toEqual(["session:idle"])
+        expect(yield* Queue.size(recorder.transitions)).toBe(0)
+      }),
+    ),
+  )
+
+  it.effect("does not report joined resumes or coalesced successor drains", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const recorder = yield* recordTransitions
+        const firstStarted = yield* Deferred.make<void>()
+        const firstGate = yield* Deferred.make<void>()
+        const secondStarted = yield* Deferred.make<void>()
+        const secondGate = yield* Deferred.make<void>()
+        let runs = 0
+        const coordinator = yield* SessionRunCoordinator.make({
+          drain: () =>
+            Effect.sync(() => ++runs).pipe(
+              Effect.flatMap((run) =>
+                run === 1
+                  ? Deferred.succeed(firstStarted, undefined).pipe(Effect.andThen(Deferred.await(firstGate)))
+                  : Deferred.succeed(secondStarted, undefined).pipe(Effect.andThen(Deferred.await(secondGate))),
+              ),
+            ),
+          ...recorder.hooks,
+        })
+
+        const resumed = yield* coordinator.run("session").pipe(Effect.forkChild)
+        yield* Deferred.await(firstStarted)
+        const joined = yield* coordinator.run("session").pipe(Effect.forkChild)
+        yield* coordinator.wake("session")
+        yield* Deferred.succeed(firstGate, undefined)
+        yield* Deferred.await(secondStarted)
+        expect(yield* recorder.take(1)).toEqual(["session:active"])
+        expect(yield* Queue.size(recorder.transitions)).toBe(0)
+
+        yield* Deferred.succeed(secondGate, undefined)
+        yield* Effect.all([Fiber.join(resumed), Fiber.join(joined)])
+        expect(yield* recorder.take(1)).toEqual(["session:idle"])
+        expect(runs).toBe(2)
+      }),
+    ),
+  )
+
+  it.effect("reports idle after failure and interruption", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const recorder = yield* recordTransitions
+        const started = yield* Deferred.make<void>()
+        const coordinator = yield* SessionRunCoordinator.make({
+          drain: (key: string) =>
+            key === "failure"
+              ? Effect.fail(new Error("failed"))
+              : Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+          ...recorder.hooks,
+        })
+
+        yield* coordinator.run("failure").pipe(Effect.exit)
+        expect(yield* recorder.take(2)).toEqual(["failure:active", "failure:idle"])
+
+        yield* coordinator.wake("interrupted")
+        yield* Deferred.await(started)
+        yield* coordinator.interrupt("interrupted")
+        expect(yield* recorder.take(2)).toEqual(["interrupted:active", "interrupted:idle"])
+      }),
+    ),
+  )
+
+  it.effect("orders a settled execution's idle before the next execution's active", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const recorder = yield* recordTransitions
+        const coordinator = yield* SessionRunCoordinator.make({ drain: () => Effect.void, ...recorder.hooks })
+
+        yield* coordinator.run("session")
+        yield* coordinator.run("session")
+
+        expect(yield* recorder.take(4)).toEqual(["session:active", "session:idle", "session:active", "session:idle"])
+      }),
+    ),
+  )
+
+  it.effect("keeps coordinating when a lifecycle hook fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const recorder = yield* recordTransitions
+        const coordinator = yield* SessionRunCoordinator.make({
+          drain: () => Effect.void,
+          onActive: (key: string) => (key === "broken" ? Effect.die("hook failed") : recorder.hooks.onActive(key)),
+          onIdle: recorder.hooks.onIdle,
+        })
+
+        yield* coordinator.run("broken")
+        yield* coordinator.run("session")
+
+        expect(yield* recorder.take(3)).toEqual(["broken:idle", "session:active", "session:idle"])
       }),
     ),
   )

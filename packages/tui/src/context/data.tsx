@@ -16,6 +16,7 @@ import type {
   SessionMessageAssistantTool,
   SessionInputAdmitted,
   SessionRollup,
+  SessionStatus,
   SessionV2Info,
   SkillV2Info,
   V2Event,
@@ -47,6 +48,8 @@ type Data = {
     input: Record<string, SessionInputAdmitted[]>
     permission: Record<string, PermissionV2Request[]>
     question: Record<string, QuestionV2Request[]>
+    /** Live execution status pushed by the server; absent until the first event or refresh. */
+    status: Record<string, SessionStatus>
   }
   project: {
     permission: Record<string, PermissionSavedInfo[]>
@@ -81,6 +84,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
         input: {},
         permission: {},
         question: {},
+        status: {},
       },
       project: {
         permission: {},
@@ -160,6 +164,20 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           const requests = draft[sessionID]
           const index = requests?.findIndex((request) => request.id === requestID) ?? -1
           if (index !== -1) requests.splice(index, 1)
+        }),
+      )
+    }
+
+    async function reseedStatus() {
+      const known = Object.keys(store.session.status)
+      if (known.length === 0) return
+      const result = await sdk.client.v2.session.active({ throwOnError: true })
+      setStore(
+        "session",
+        "status",
+        produce((draft) => {
+          for (const sessionID of known)
+            draft[sessionID] = { type: result.data.data[sessionID] === undefined ? "idle" : "busy" }
         }),
       )
     }
@@ -459,6 +477,13 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             }
           })
           break
+        case "session.next.status.changed":
+          setStore("session", "status", event.data.sessionID, { type: event.data.status })
+          break
+        case "server.connected":
+          // Status events are live-only, so any sent while disconnected are lost; reseed every known session.
+          void reseedStatus().catch((error) => console.error("Failed to reseed session status", error))
+          break
         case "session.next.retried":
         case "session.next.compaction.started":
         case "session.next.compaction.delta":
@@ -639,6 +664,22 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(sessionID: string) {
             const result = await sdk.client.v2.session.permission.list({ sessionID }, { throwOnError: true })
             setStore("session", "permission", sessionID, result.data.data)
+          },
+        },
+        status: {
+          get(sessionID: string): SessionStatus {
+            return store.session.status[sessionID] ?? { type: "idle" }
+          },
+          /**
+           * Seeds status for a session attached mid-run, before this process has seen any status event for it.
+           * A pushed value always wins, so a snapshot that raced a newer event cannot overwrite it.
+           */
+          async refresh(sessionID: string) {
+            const result = await sdk.client.v2.session.active({ throwOnError: true })
+            if (store.session.status[sessionID]) return
+            setStore("session", "status", sessionID, {
+              type: result.data.data[sessionID] === undefined ? "idle" : "busy",
+            })
           },
         },
         question: {

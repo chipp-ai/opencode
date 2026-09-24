@@ -403,6 +403,7 @@ export function Session() {
           data.session.message.refresh(sessionID),
           data.session.permission.refresh(sessionID),
           data.session.question.refresh(sessionID),
+          data.session.status.refresh(sessionID),
         ])
         setV2SessionID(sessionID)
       }

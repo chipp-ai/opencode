@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test"
 import type { Provider, SessionMessage } from "@opencode-ai/sdk/v2"
 import {
   isV2Session,
-  isV2SessionBusy,
   liveSwitch,
   switchLabel,
   toV1Permission,
@@ -72,37 +71,6 @@ describe("v2SwitchPlan", () => {
 
   test("switches both when the session has no selection yet", () => {
     expect(v2SwitchPlan({}, { agent: "build", model })).toEqual({ agent: "build", model })
-  })
-})
-
-describe("isV2SessionBusy", () => {
-  const user: SessionMessage = { id: "msg_u", type: "user", text: "hi", time: { created: 1 } }
-  const assistant = (completed?: number): SessionMessage => ({
-    id: "msg_a",
-    type: "assistant",
-    agent: "build",
-    model,
-    content: [],
-    time: { created: 2, completed },
-  })
-
-  test("is idle with no transcript", () => {
-    expect(isV2SessionBusy()).toBe(false)
-    expect(isV2SessionBusy([])).toBe(false)
-  })
-
-  test("is busy while a promoted prompt awaits its first step", () => {
-    expect(isV2SessionBusy([user])).toBe(true)
-  })
-
-  test("is busy while the newest step is unfinished and idle once it completes", () => {
-    expect(isV2SessionBusy([assistant(), user])).toBe(true)
-    expect(isV2SessionBusy([assistant(3), user])).toBe(false)
-  })
-
-  test("ignores non-turn messages such as model switches", () => {
-    const switched: SessionMessage = { id: "msg_s", type: "model-switched", model, time: { created: 4 } }
-    expect(isV2SessionBusy([switched, assistant(3), user])).toBe(false)
   })
 })
 

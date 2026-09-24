@@ -56,19 +56,6 @@ function sameModel(current: ModelRef | undefined, next: ModelRef) {
 }
 
 /**
- * V2 has no durable busy/idle status yet, so infer it from the newest-first projected transcript:
- * a promoted prompt still awaiting its first step, or an unfinished step. The short gap between a
- * tool-calls step ending and the continuation step starting reads as idle; treating "tool-calls" as
- * busy instead would stick forever when a run is interrupted after its tools settle.
- */
-export function isV2SessionBusy(messages: SessionMessage[] = []) {
-  const latest = messages.find((message) => message.type === "user" || message.type === "assistant")
-  if (!latest) return false
-  if (latest.type === "user") return true
-  return !latest.time.completed
-}
-
-/**
  * Context-window usage from the newest finished step that produced output, which is what the provider last
  * saw. `messages` is newest-first.
  */

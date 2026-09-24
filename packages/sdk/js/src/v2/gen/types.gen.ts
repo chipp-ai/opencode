@@ -46,6 +46,7 @@ export type Event =
   | EventSessionNextToolSuccess
   | EventSessionNextToolFailed
   | EventSessionNextRetried
+  | EventSessionNextStatusChanged
   | EventSessionNextCompactionStarted
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
@@ -1176,6 +1177,15 @@ export type GlobalEvent = {
           sessionID: string
           attempt: number
           error: SessionNextRetryError
+        }
+      }
+    | {
+        id: string
+        type: "session.next.status.changed"
+        properties: {
+          timestamp: number
+          sessionID: string
+          status: "busy" | "idle"
         }
       }
     | {
@@ -2997,6 +3007,7 @@ export type V2Event =
   | SessionNextToolSuccess
   | SessionNextToolFailed
   | SessionNextRetried
+  | SessionNextStatusChanged
   | SessionNextCompactionStarted
   | SessionNextCompactionDelta
   | SessionNextCompactionEnded
@@ -5580,6 +5591,25 @@ export type SessionNextToolInputDelta = {
   }
 }
 
+export type SessionNextStatusChanged = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.status.changed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    status: "busy" | "idle"
+  }
+}
+
 export type SessionNextCompactionDelta = {
   id: string
   metadata?: {
@@ -6922,6 +6952,16 @@ export type EventSessionNextRetried = {
     sessionID: string
     attempt: number
     error: SessionNextRetryError
+  }
+}
+
+export type EventSessionNextStatusChanged = {
+  id: string
+  type: "session.next.status.changed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    status: "busy" | "idle"
   }
 }
 

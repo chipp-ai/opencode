@@ -862,3 +862,77 @@ test("pages older V2 messages until a short page ends the history", async () => 
     app.renderer.destroy()
   }
 })
+
+test("tracks pushed V2 session status and seeds it only for sessions without a pushed value", async () => {
+  const events = createEventSource()
+  const active = { requests: 0 }
+  const calls = createFetch((url) => {
+    if (url.pathname !== "/api/session/active") return
+    active.requests++
+    return json({ data: { "session-running": { type: "running" } } })
+  }, events)
+  let data!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    data = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+        <ProjectProvider>
+          <TestData>
+            <Probe />
+          </TestData>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  const status = (sessionID: string, value: "busy" | "idle", timestamp: number): Event => ({
+    id: `evt_status_${timestamp}`,
+    type: "session.next.status.changed",
+    properties: { sessionID, status: value, timestamp },
+  })
+
+  try {
+    await mounted
+    expect(data.session.status.get("session-1")).toEqual({ type: "idle" })
+
+    emitEvent(events, status("session-1", "busy", 1))
+    await wait(() => data.session.status.get("session-1").type === "busy")
+    emitEvent(events, status("session-1", "idle", 2))
+    await wait(() => data.session.status.get("session-1").type === "idle")
+
+    // Attaching to a session mid-run seeds from the active set; an already-pushed status is authoritative.
+    emitEvent(events, status("session-pushed", "busy", 3))
+    await wait(() => data.session.status.get("session-pushed").type === "busy")
+    await Promise.all([
+      data.session.status.refresh("session-running"),
+      data.session.status.refresh("session-quiet"),
+      data.session.status.refresh("session-pushed"),
+    ])
+    expect(active.requests).toBe(3)
+    expect(data.session.status.get("session-running")).toEqual({ type: "busy" })
+    expect(data.session.status.get("session-quiet")).toEqual({ type: "idle" })
+    expect(data.session.status.get("session-pushed")).toEqual({ type: "busy" })
+
+    emitEvent(events, status("session-running", "idle", 4))
+    await wait(() => data.session.status.get("session-running").type === "idle")
+
+    // An idle event lost while disconnected is corrected by the reseed on the next connection.
+    expect(data.session.status.get("session-pushed")).toEqual({ type: "busy" })
+    emitEvent(events, { id: "evt_connected", type: "server.connected", properties: {} })
+    await wait(() => data.session.status.get("session-pushed").type === "idle")
+    expect(data.session.status.get("session-running")).toEqual({ type: "busy" })
+    expect(active.requests).toBe(4)
+  } finally {
+    app.renderer.destroy()
+  }
+})
