@@ -22,8 +22,6 @@ import { name } from "./model"
 
 /** Session palette commands that depend on V1-only endpoints or V1 message data, with no V2 path in the TUI yet. */
 export const V2_UNAVAILABLE_COMMANDS = new Set([
-  "session.share",
-  "session.unshare",
   "session.fork",
   "session.timeline",
   "session.compact",

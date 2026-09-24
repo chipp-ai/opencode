@@ -1,6 +1,7 @@
 import { buildLocationServiceMap } from "../location-services"
 import { LocationServiceMap } from "../location-service-map"
 import { SessionDispatchPort } from "../session/dispatch-port"
+import { SessionSharePort } from "../session/share-port"
 import { LayerNode } from "./layer-node"
 import { makeGlobalNode } from "./app-node"
 
@@ -21,6 +22,10 @@ export function build<A, E>(root: LayerNode.Node<A, E, any>, replacements: Layer
   // without ever routing through `LocationServiceMap.node` at all.
   if (LayerNode.hasUnbound(root, SessionDispatchPort.node) && !hasReplacement(allReplacements, SessionDispatchPort.node)) {
     allReplacements = allReplacements.concat([[SessionDispatchPort.node, SessionDispatchPort.unavailableLayer]])
+  }
+
+  if (LayerNode.hasUnbound(root, SessionSharePort.node) && !hasReplacement(allReplacements, SessionSharePort.node)) {
+    allReplacements = allReplacements.concat([[SessionSharePort.node, SessionSharePort.unavailableLayer]])
   }
 
   return LayerNode.compile(root, allReplacements)

@@ -18,6 +18,7 @@ export type Event =
   | EventMessagePartRemoved
   | EventSessionNextAgentSwitched
   | EventSessionNextModelSwitched
+  | EventSessionNextTitleChanged
   | EventSessionNextMoved
   | EventSessionNextPrompted
   | EventSessionNextPromptAdmitted
@@ -644,6 +645,9 @@ export type Prompt = {
   text: string
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
+  format?: PromptFormat
+  agentOverride?: string
+  modelOverride?: ModelRef
 }
 
 export type Pty = {
@@ -842,6 +846,15 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.title.changed"
+        properties: {
+          timestamp: number
+          sessionID: string
+          title: string
+        }
+      }
+    | {
+        id: string
         type: "session.next.moved"
         properties: {
           timestamp: number
@@ -964,6 +977,8 @@ export type GlobalEvent = {
           }
           snapshot?: string
           files?: Array<string>
+          structured?: unknown
+          error?: SessionErrorStructuredOutput
         }
       }
     | {
@@ -1631,6 +1646,7 @@ export type GlobalEvent = {
     | SyncEventMessagePartRemoved
     | SyncEventSessionNextAgentSwitched
     | SyncEventSessionNextModelSwitched
+    | SyncEventSessionNextTitleChanged
     | SyncEventSessionNextMoved
     | SyncEventSessionNextPrompted
     | SyncEventSessionNextPromptAdmitted
@@ -2740,6 +2756,9 @@ export type PromptInput = {
   text: string
   files?: Array<PromptInputFileAttachment>
   agents?: Array<PromptAgentAttachment>
+  format?: PromptFormat
+  agentOverride?: string
+  modelOverride?: ModelRef
 }
 
 export type ConflictError = {
@@ -2754,12 +2773,17 @@ export type ServiceUnavailableError = {
   service?: string
 }
 
-export type MessageNotFoundError = {
-  _tag: "MessageNotFoundError"
-  sessionID: string
-  messageID: string
-  message: string
-}
+export type SessionCommandResult =
+  | {
+      type: "prompt"
+      input: SessionInputAdmitted
+    }
+  | {
+      type: "subtask"
+      sessionID: string
+      text: string
+      error?: string
+    }
 
 export type UnknownError1 = {
   _tag: "UnknownError"
@@ -2767,9 +2791,17 @@ export type UnknownError1 = {
   ref?: string
 }
 
+export type MessageNotFoundError = {
+  _tag: "MessageNotFoundError"
+  sessionID: string
+  messageID: string
+  message: string
+}
+
 export type SessionDurableEvent =
   | SessionNextAgentSwitched
   | SessionNextModelSwitched
+  | SessionNextTitleChanged
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
@@ -2829,6 +2861,32 @@ export type OutputFormat1 =
       schema: JsonSchema
       retryCount?: number
     }
+
+export type SessionError = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.error"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID?: string
+    error?:
+      | ProviderAuthError
+      | UnknownError
+      | MessageOutputLengthError
+      | MessageAbortedError
+      | StructuredOutputError
+      | ContextOverflowError
+      | ContentFilterError
+      | ApiError
+  }
+}
 
 export type SessionStatus2 = {
   id: string
@@ -2899,6 +2957,7 @@ export type V2Event =
   | MessagePartRemoved
   | SessionNextAgentSwitched
   | SessionNextModelSwitched
+  | SessionNextTitleChanged
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
@@ -3110,6 +3169,18 @@ export type PromptFileAttachment = {
 export type PromptAgentAttachment = {
   name: string
   source?: PromptSource
+}
+
+export type PromptFormat = {
+  type: "json_schema"
+  schema: {
+    [key: string]: unknown
+  }
+}
+
+export type SessionErrorStructuredOutput = {
+  type: "structured_output"
+  message: string
 }
 
 export type SessionErrorUnknown = {
@@ -3379,6 +3450,22 @@ export type SyncEventSessionNextModelSwitched = {
   }
 }
 
+export type SyncEventSessionNextTitleChanged = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.title.changed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      title: string
+    }
+  }
+}
+
 export type SyncEventSessionNextMoved = {
   type: "sync"
   id: string
@@ -3578,6 +3665,8 @@ export type SyncEventSessionNextStepEnded = {
       }
       snapshot?: string
       files?: Array<string>
+      structured?: unknown
+      error?: SessionErrorStructuredOutput
     }
   }
 }
@@ -4011,6 +4100,9 @@ export type SessionV2Info = {
   location: LocationRef
   subpath?: string
   revert?: RevertState
+  share?: {
+    url: string
+  }
 }
 
 export type SessionRollup = {
@@ -4075,6 +4167,9 @@ export type SessionMessageUser = {
   text: string
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
+  format?: PromptFormat
+  agentOverride?: string
+  modelOverride?: ModelRef
   type: "user"
 }
 
@@ -4200,6 +4295,8 @@ export type SessionMessageAssistantTool = {
   }
 }
 
+export type SessionError2 = SessionErrorUnknown | SessionErrorStructuredOutput
+
 export type SessionMessageAssistant = {
   id: string
   metadata?: {
@@ -4229,7 +4326,8 @@ export type SessionMessageAssistant = {
       write: number
     }
   }
-  error?: SessionErrorUnknown
+  structured?: unknown
+  error?: SessionError2
 }
 
 export type SessionMessageCompaction = {
@@ -4293,6 +4391,25 @@ export type SessionNextModelSwitched = {
     sessionID: string
     messageID: string
     model: ModelRef
+  }
+}
+
+export type SessionNextTitleChanged = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.title.changed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    title: string
   }
 }
 
@@ -4529,6 +4646,8 @@ export type SessionNextStepEnded = {
     }
     snapshot?: string
     files?: Array<string>
+    structured?: unknown
+    error?: SessionErrorStructuredOutput
   }
 }
 
@@ -5472,32 +5591,6 @@ export type SessionDiff = {
   }
 }
 
-export type SessionError = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  type: "session.error"
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  data: {
-    sessionID?: string
-    error?:
-      | ProviderAuthError
-      | UnknownError
-      | MessageOutputLengthError
-      | MessageAbortedError
-      | StructuredOutputError
-      | ContextOverflowError
-      | ContentFilterError
-      | ApiError
-  }
-}
-
 export type InstallationUpdated = {
   id: string
   metadata?: {
@@ -6423,6 +6516,16 @@ export type EventSessionNextModelSwitched = {
   }
 }
 
+export type EventSessionNextTitleChanged = {
+  id: string
+  type: "session.next.title.changed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    title: string
+  }
+}
+
 export type EventSessionNextMoved = {
   id: string
   type: "session.next.moved"
@@ -6557,6 +6660,8 @@ export type EventSessionNextStepEnded = {
     }
     snapshot?: string
     files?: Array<string>
+    structured?: unknown
+    error?: SessionErrorStructuredOutput
   }
 }
 
@@ -11966,6 +12071,184 @@ export type V2SessionCompactResponses = {
 }
 
 export type V2SessionCompactResponse = V2SessionCompactResponses[keyof V2SessionCompactResponses]
+
+export type V2SessionShellData = {
+  body: {
+    id?: string
+    command: string
+    resume?: boolean
+  }
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/shell"
+}
+
+export type V2SessionShellErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * ConflictError
+   */
+  409: ConflictError
+}
+
+export type V2SessionShellError = V2SessionShellErrors[keyof V2SessionShellErrors]
+
+export type V2SessionShellResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2SessionShellResponse = V2SessionShellResponses[keyof V2SessionShellResponses]
+
+export type V2SessionCommandData = {
+  body: {
+    id?: string
+    command: string
+    arguments?: string
+    agent?: string
+    model?: ModelRef
+    files?: Array<PromptInputFileAttachment>
+    delivery?: "steer" | "queue"
+  }
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/command"
+}
+
+export type V2SessionCommandErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * ConflictError
+   */
+  409: ConflictError
+  /**
+   * UnknownError
+   */
+  500: UnknownError1
+}
+
+export type V2SessionCommandError = V2SessionCommandErrors[keyof V2SessionCommandErrors]
+
+export type V2SessionCommandResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: SessionCommandResult
+  }
+}
+
+export type V2SessionCommandResponse = V2SessionCommandResponses[keyof V2SessionCommandResponses]
+
+export type V2SessionUnshareData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/share"
+}
+
+export type V2SessionUnshareErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
+}
+
+export type V2SessionUnshareError = V2SessionUnshareErrors[keyof V2SessionUnshareErrors]
+
+export type V2SessionUnshareResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: SessionV2Info
+  }
+}
+
+export type V2SessionUnshareResponse = V2SessionUnshareResponses[keyof V2SessionUnshareResponses]
+
+export type V2SessionShareData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/share"
+}
+
+export type V2SessionShareErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
+}
+
+export type V2SessionShareError = V2SessionShareErrors[keyof V2SessionShareErrors]
+
+export type V2SessionShareResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: SessionV2Info
+  }
+}
+
+export type V2SessionShareResponse = V2SessionShareResponses[keyof V2SessionShareResponses]
 
 export type V2SessionWaitData = {
   body?: never

@@ -32,9 +32,10 @@ describe("isV2Session", () => {
 
 describe("V2_UNAVAILABLE_COMMANDS", () => {
   test("covers the V1-only session commands", () => {
-    for (const command of ["session.share", "session.unshare", "session.fork", "session.compact"])
-      expect(V2_UNAVAILABLE_COMMANDS.has(command)).toBe(true)
-    expect(V2_UNAVAILABLE_COMMANDS.has("session.rename")).toBe(false)
+    for (const command of ["session.fork", "session.compact"]) expect(V2_UNAVAILABLE_COMMANDS.has(command)).toBe(true)
+    // Sharing has a V2 path (v2.session.share/unshare), so it is no longer gated.
+    for (const command of ["session.rename", "session.share", "session.unshare"])
+      expect(V2_UNAVAILABLE_COMMANDS.has(command)).toBe(false)
   })
 })
 

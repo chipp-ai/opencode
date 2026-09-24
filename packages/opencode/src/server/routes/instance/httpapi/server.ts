@@ -40,6 +40,7 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { SessionShare } from "@/share/session"
+import { SessionShareV2 } from "@/share/session-v2"
 import { ShareNext } from "@/share/share-next"
 import { Skill } from "@/skill"
 import { Discovery } from "@/skill/discovery"
@@ -66,6 +67,7 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionDispatchPort } from "@opencode-ai/core/session/dispatch-port"
+import { SessionSharePort } from "@opencode-ai/core/session/share-port"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
 import { lazy } from "@/util/lazy"
@@ -315,6 +317,8 @@ export function createRoutes(
       AppNodeBuilderV1.build(SessionV2.node, [
         [LocationServiceMap.node, locationServiceMapV2],
         [SessionExecution.node, SessionExecutionLocal.node],
+        // Raw Layer for the same reason as `dispatchPortLayer`; its ShareNext/Session requirements come from `app` below.
+        [SessionSharePort.node, SessionShareV2.layer],
       ]),
     ),
     Layer.provide(locationServiceMapV2),

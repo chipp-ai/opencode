@@ -636,9 +636,12 @@ export function Session() {
     }
   }
 
+  // V2 sharing lives in session_share and is projected onto the V2 Session info, not the legacy share_url column.
+  const shareURL = createMemo(() => (v2() ? data.session.get(route.sessionID)?.share?.url : session()?.share?.url))
+
   const sessionCommandList = createMemo(() => [
     {
-      title: session()?.share?.url ? "Copy share link" : "Share session",
+      title: shareURL() ? "Copy share link" : "Share session",
       value: "session.share",
       suggested: route.type === "session",
       category: "Session",
@@ -652,7 +655,7 @@ export function Session() {
             .write?.(url)
             .then(() => toast.show({ message: "Share URL copied to clipboard!", variant: "success" }))
             .catch(() => toast.show({ message: "Failed to copy URL to clipboard", variant: "error" }))
-        const url = session()?.share?.url
+        const url = shareURL()
         if (url) {
           await copy(url)
           dialog.clear()
@@ -663,17 +666,17 @@ export function Session() {
           if (ok !== true) return
           kv.set("share_consent", true)
         }
-        await sdk.client.session
-          .share({
-            sessionID: route.sessionID,
+        const shared = v2()
+          ? sdk.client.v2.session
+              .share({ sessionID: route.sessionID }, { throwOnError: true })
+              .then((res) => data.session.refresh(route.sessionID).then(() => res.data.data.share!.url))
+          : sdk.client.session.share({ sessionID: route.sessionID }).then((res) => res.data!.share!.url)
+        await shared.then(copy).catch((error) => {
+          toast.show({
+            message: error instanceof Error ? error.message : "Failed to share session",
+            variant: "error",
           })
-          .then((res) => copy(res.data!.share!.url))
-          .catch((error) => {
-            toast.show({
-              message: error instanceof Error ? error.message : "Failed to share session",
-              variant: "error",
-            })
-          })
+        })
         dialog.clear()
       },
     },
@@ -776,15 +779,17 @@ export function Session() {
       title: "Unshare session",
       value: "session.unshare",
       category: "Session",
-      enabled: !!session()?.share?.url,
+      enabled: !!shareURL(),
       slash: {
         name: "unshare",
       },
       run: async () => {
-        await sdk.client.session
-          .unshare({
-            sessionID: route.sessionID,
-          })
+        const unshared = v2()
+          ? sdk.client.v2.session
+              .unshare({ sessionID: route.sessionID }, { throwOnError: true })
+              .then(() => data.session.refresh(route.sessionID))
+          : sdk.client.session.unshare({ sessionID: route.sessionID })
+        await unshared
           .then(() => toast.show({ message: "Session unshared successfully", variant: "success" }))
           .catch((error) => {
             toast.show({

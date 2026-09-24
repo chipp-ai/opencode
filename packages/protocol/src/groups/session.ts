@@ -363,6 +363,37 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
         ),
     )
     .add(
+      HttpApiEndpoint.post("session.share", "/api/session/:sessionID/share", {
+        params: { sessionID: Session.ID },
+        success: Schema.Struct({ data: Session.Info }),
+        error: [SessionNotFoundError, ServiceUnavailableError],
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "v2.session.share",
+            summary: "Share session",
+            description:
+              "Publish the session to the hosted share service and keep the shared copy in sync as the session changes. Returns the session with its share URL.",
+          }),
+        ),
+    )
+    .add(
+      HttpApiEndpoint.delete("session.unshare", "/api/session/:sessionID/share", {
+        params: { sessionID: Session.ID },
+        success: Schema.Struct({ data: Session.Info }),
+        error: [SessionNotFoundError, ServiceUnavailableError],
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "v2.session.unshare",
+            summary: "Unshare session",
+            description: "Remove the session from the hosted share service and stop syncing it.",
+          }),
+        ),
+    )
+    .add(
       HttpApiEndpoint.post("session.wait", "/api/session/:sessionID/wait", {
         params: { sessionID: Session.ID },
         success: HttpApiSchema.NoContent,

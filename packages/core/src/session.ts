@@ -16,6 +16,7 @@ import { EventV2 } from "./event"
 import { Database } from "./database/database"
 import { SessionProjector } from "./session/projector"
 import { SessionMessageTable, SessionTable } from "./session/sql"
+import { SessionShareTable } from "./share/sql"
 import { SessionSchema } from "./session/schema"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema"
 import { AgentV2 } from "./agent"
@@ -50,6 +51,7 @@ import { AppProcess } from "./process"
 import { Shell } from "./shell"
 import { Identifier } from "./id/id"
 import { CommandV2 } from "./command"
+import { SessionSharePort } from "./session/share-port"
 import fuzzysort from "fuzzysort"
 
 export const RevertState = Revert.State
@@ -161,6 +163,11 @@ const suggest = (name: string, available: ReadonlyArray<string>, kind: string) =
   return ` Available ${kind}: ${available.join(", ")}`
 }
 
+export class ShareError extends Schema.TaggedErrorClass<ShareError>()("Session.ShareError", {
+  sessionID: SessionSchema.ID,
+  message: Schema.String,
+}) {}
+
 export type CommandResult =
   | { readonly type: "prompt"; readonly input: SessionInput.Admitted }
   | {
@@ -179,6 +186,7 @@ export type Error =
   | BusyError
   | CommandNotFoundError
   | AgentNotFoundError
+  | ShareError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
@@ -271,6 +279,9 @@ export interface Interface {
     skill: string
     resume?: boolean
   }) => Effect.Effect<void, OperationUnavailableError>
+  /** Publishes this Session to the hosted share service and keeps the shared copy in sync; returns its public URL. */
+  readonly share: (sessionID: SessionSchema.ID) => Effect.Effect<{ readonly url: string }, NotFoundError | ShareError>
+  readonly unshare: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | ShareError>
   readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly wait: (id: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
@@ -301,6 +312,7 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
     const llm = yield* LLMClient.Service
     const appProcess = yield* AppProcess.Service
+    const sharing = yield* SessionSharePort.Service
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
     const decode = (row: typeof SessionMessageTable.$inferSelect) =>
@@ -411,8 +423,9 @@ const layer = Layer.effect(
           )
         }
         const query = db
-          .select()
+          .select({ session: SessionTable, shareURL: SessionShareTable.url })
           .from(SessionTable)
+          .leftJoin(SessionShareTable, eq(SessionShareTable.session_id, SessionTable.id))
           .where(conditions.length > 0 ? and(...conditions) : undefined)
           .orderBy(
             order === "asc" ? asc(sortColumn) : desc(sortColumn),
@@ -421,7 +434,7 @@ const layer = Layer.effect(
         const rows = yield* (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(
           Effect.orDie,
         )
-        return (direction === "previous" ? rows.toReversed() : rows).map((row) => fromRow(row))
+        return (direction === "previous" ? rows.toReversed() : rows).map((row) => fromRow(row.session, row.shareURL))
       }),
       messages: Effect.fn("V2Session.messages")(function* (input) {
         yield* result.get(input.sessionID)
@@ -694,6 +707,14 @@ const layer = Layer.effect(
           model: input.model,
         })
       }),
+      share: Effect.fn("V2Session.share")(function* (sessionID) {
+        yield* result.get(sessionID)
+        return yield* sharing.share(sessionID).pipe(Effect.mapError((cause) => shareError(sessionID, cause)))
+      }),
+      unshare: Effect.fn("V2Session.unshare")(function* (sessionID) {
+        yield* result.get(sessionID)
+        yield* sharing.unshare(sessionID).pipe(Effect.mapError((cause) => shareError(sessionID, cause)))
+      }),
       compact: Effect.fn("V2Session.compact")(function* (input) {
         const session = yield* result.get(input.sessionID)
         yield* Effect.gen(function* () {
@@ -793,6 +814,9 @@ const runShell = (appProcess: AppProcess.Interface, shell: string, command: stri
       ),
     )
 
+const shareError = (sessionID: SessionSchema.ID, cause: unknown) =>
+  new ShareError({ sessionID, message: cause instanceof Error ? cause.message : String(cause) })
+
 const sameModel = (model: ModelV2.Ref, current: ModelV2.Ref | undefined) =>
   current?.providerID === model.providerID &&
   current.id === model.id &&
@@ -828,5 +852,6 @@ export const node = makeGlobalNode({
     SessionProjector.node,
     llmClient,
     AppProcess.node,
+    SessionSharePort.node,
   ],
 })

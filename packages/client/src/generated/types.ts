@@ -280,6 +280,7 @@ export type SessionsListOutput = {
         readonly patch: string
       }>
     }
+    readonly share?: { readonly url: string }
   }>
   readonly cursor: { readonly previous?: string | null; readonly next?: string | null }
 }
@@ -342,6 +343,7 @@ export type SessionsCreateOutput = {
         readonly patch: string
       }>
     }
+    readonly share?: { readonly url: string }
   }
 }["data"]
 
@@ -380,6 +382,7 @@ export type SessionsGetOutput = {
         readonly patch: string
       }>
     }
+    readonly share?: { readonly url: string }
   }
 }["data"]
 
@@ -788,6 +791,80 @@ export type SessionsCommandOutput = {
         }
       }
     | { readonly type: "subtask"; readonly sessionID: string; readonly text: string; readonly error?: string | null }
+}["data"]
+
+export type SessionsShareInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
+
+export type SessionsShareOutput = {
+  readonly data: {
+    readonly id: string
+    readonly parentID?: string
+    readonly projectID: string
+    readonly agent?: string
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+    readonly cost: number
+    readonly tokens: {
+      readonly input: number
+      readonly output: number
+      readonly reasoning: number
+      readonly cache: { readonly read: number; readonly write: number }
+    }
+    readonly time: { readonly created: number; readonly updated: number; readonly archived?: number }
+    readonly title: string
+    readonly location: { readonly directory: string; readonly workspaceID?: string }
+    readonly subpath?: string
+    readonly revert?: {
+      readonly messageID: string
+      readonly partID?: string
+      readonly snapshot?: string
+      readonly diff?: string
+      readonly files?: ReadonlyArray<{
+        readonly path: string
+        readonly status: "added" | "modified" | "deleted"
+        readonly additions: number
+        readonly deletions: number
+        readonly patch: string
+      }>
+    }
+    readonly share?: { readonly url: string }
+  }
+}["data"]
+
+export type SessionsUnshareInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
+
+export type SessionsUnshareOutput = {
+  readonly data: {
+    readonly id: string
+    readonly parentID?: string
+    readonly projectID: string
+    readonly agent?: string
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+    readonly cost: number
+    readonly tokens: {
+      readonly input: number
+      readonly output: number
+      readonly reasoning: number
+      readonly cache: { readonly read: number; readonly write: number }
+    }
+    readonly time: { readonly created: number; readonly updated: number; readonly archived?: number }
+    readonly title: string
+    readonly location: { readonly directory: string; readonly workspaceID?: string }
+    readonly subpath?: string
+    readonly revert?: {
+      readonly messageID: string
+      readonly partID?: string
+      readonly snapshot?: string
+      readonly diff?: string
+      readonly files?: ReadonlyArray<{
+        readonly path: string
+        readonly status: "added" | "modified" | "deleted"
+        readonly additions: number
+        readonly deletions: number
+        readonly patch: string
+      }>
+    }
+    readonly share?: { readonly url: string }
+  }
 }["data"]
 
 export type SessionsWaitInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }

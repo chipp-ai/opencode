@@ -48,7 +48,7 @@ type State = {
   shared: Map<SessionID, Share | null>
 }
 
-type Data =
+export type Data =
   | {
       type: "session"
       data: SDK.Session
@@ -74,7 +74,10 @@ export interface Interface {
   readonly init: () => Effect.Effect<void, unknown>
   readonly url: () => Effect.Effect<string, unknown>
   readonly request: () => Effect.Effect<Req, unknown>
-  readonly create: (sessionID: SessionID) => Effect.Effect<Share, unknown>
+  /** `full: false` skips the initial V1 transcript sync, for callers that sync their own snapshot (V2 sessions). */
+  readonly create: (sessionID: SessionID, options?: { readonly full?: boolean }) => Effect.Effect<Share, unknown>
+  /** Queues items for the next debounced sync of a shared session; a no-op when the session is not shared. */
+  readonly sync: (sessionID: SessionID, data: Data[]) => Effect.Effect<void, unknown>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, unknown>
 }
 
@@ -307,7 +310,10 @@ const layer = Layer.effect(
       return (yield* request()).baseUrl
     })
 
-    const create = Effect.fn("ShareNext.create")(function* (sessionID: SessionID) {
+    const create = Effect.fn("ShareNext.create")(function* (
+      sessionID: SessionID,
+      options?: { readonly full?: boolean },
+    ) {
       if (disabled) return { id: "", url: "", secret: "" }
       yield* Effect.logInfo("creating share", { sessionID: sessionID })
       const req = yield* request()
@@ -328,6 +334,7 @@ const layer = Layer.effect(
         .pipe(Effect.orDie)
       const s = yield* InstanceState.get(state)
       s.shared.set(sessionID, result)
+      if (options?.full === false) return result
       yield* full(sessionID).pipe(
         Effect.catchCause((cause) => Effect.logError("share full sync failed", { sessionID: sessionID, cause: cause })),
         Effect.forkIn(s.scope),
@@ -358,7 +365,7 @@ const layer = Layer.effect(
       s.queue.delete(sessionID)
     })
 
-    return Service.of({ init, url, request, create, remove })
+    return Service.of({ init, url, request, create, sync, remove })
   }),
 )
 

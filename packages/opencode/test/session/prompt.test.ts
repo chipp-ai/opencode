@@ -56,6 +56,7 @@ import { reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { SessionSharePort } from "@opencode-ai/core/session/share-port"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
 
 const summary = Layer.succeed(
@@ -732,6 +733,7 @@ noLLMServer.instance.skip(
           LayerNode.compile(SessionV2.node, [
             [SessionExecution.node, SessionExecution.noopLayer],
             [LocationServiceMap.node, locationServiceMapLayer],
+            [SessionSharePort.node, SessionSharePort.unavailableLayer],
           ]),
         ),
       )

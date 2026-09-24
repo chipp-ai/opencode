@@ -848,6 +848,67 @@ describe("session HttpApi", () => {
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 
+  it.live("shares and unshares a v2 session against the hosted share backend", () =>
+    Effect.gen(function* () {
+      // Stands in for opncd.ai/enterprise: the composed server uses the real HttpClient, so fake it over HTTP.
+      const received: { method: string; path: string; body: unknown }[] = []
+      const backend = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          Bun.serve({
+            port: 0,
+            async fetch(req) {
+              const text = await req.text()
+              received.push({
+                method: req.method,
+                path: new URL(req.url).pathname,
+                body: text ? JSON.parse(text) : undefined,
+              })
+              if (req.method === "POST" && new URL(req.url).pathname === "/api/share")
+                return Response.json({ id: "shr_http", url: "https://share.test/s/http", secret: "sec_http" })
+              return Response.json({})
+            },
+          }),
+        ),
+        (server) => Effect.promise(() => server.stop(true)),
+      )
+      const directory = yield* tmpdirScoped({ git: true, config: { enterprise: { url: backend.url.origin } } })
+      const headers = { "x-opencode-directory": directory }
+      const json = { ...headers, "content-type": "application/json" }
+      const created = yield* requestJson<{ data: { id: string } }>("/api/session", {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ location: { directory } }),
+      })
+      const sessionID = created.data.id
+
+      const shared = yield* requestJson<{ data: { id: string; share?: { url: string } } }>(
+        `/api/session/${sessionID}/share`,
+        { method: "POST", headers },
+      )
+      expect(shared.data).toMatchObject({ id: sessionID, share: { url: "https://share.test/s/http" } })
+      expect(received[0]).toEqual({ method: "POST", path: "/api/share", body: { sessionID } })
+      const info = yield* requestJson<{ data: { share?: { url: string } } }>(`/api/session/${sessionID}`, { headers })
+      expect(info.data.share).toEqual({ url: "https://share.test/s/http" })
+      yield* pollWithTimeout(
+        Effect.sync(() => received.find((item) => item.path === "/api/share/shr_http/sync")),
+        "the shared session never synced to the share backend",
+        "8 seconds",
+      )
+
+      const unshared = yield* requestJson<{ data: { share?: { url: string } } }>(`/api/session/${sessionID}/share`, {
+        method: "DELETE",
+        headers,
+      })
+      expect(unshared.data.share).toBeUndefined()
+      expect(received.filter((item) => item.method === "DELETE")).toEqual([
+        { method: "DELETE", path: "/api/share/shr_http", body: { secret: "sec_http" } },
+      ])
+
+      const missing = yield* request(`/api/session/${SessionID.descending()}/share`, { method: "POST", headers })
+      expect(missing.status).toBe(404)
+    }).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
+
   // session.wait is implemented for real (SessionRunCoordinator.join) -- an idle session (no
   // active drain) resolves immediately with no content, rather than the old hardcoded 503 stub.
   it.instance(

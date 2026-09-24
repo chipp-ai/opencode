@@ -31,6 +31,10 @@ import type {
   SessionsShellOutput,
   SessionsCommandInput,
   SessionsCommandOutput,
+  SessionsShareInput,
+  SessionsShareOutput,
+  SessionsUnshareInput,
+  SessionsUnshareOutput,
   SessionsWaitInput,
   SessionsWaitOutput,
   SessionsStageInput,
@@ -481,6 +485,28 @@ export function make(options: ClientOptions) {
             },
             successStatus: 200,
             declaredStatuses: [409, 400, 404, 500, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      share: (input: SessionsShareInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SessionsShareOutput }>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/share`,
+            successStatus: 200,
+            declaredStatuses: [404, 503, 400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      unshare: (input: SessionsUnshareInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SessionsUnshareOutput }>(
+          {
+            method: "DELETE",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/share`,
+            successStatus: 200,
+            declaredStatuses: [404, 503, 400, 401],
             empty: false,
           },
           requestOptions,

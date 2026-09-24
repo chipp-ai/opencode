@@ -1,5 +1,6 @@
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
+import { useData } from "../../context/data"
 import { createMemo, Show } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useTuiConfig } from "../../config"
@@ -15,7 +16,10 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const sync = useSync()
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
+  const data = useData()
   const session = createMemo(() => sync.session.get(props.sessionID))
+  // V2 Sessions carry their share URL on the V2 info (from session_share); legacy Sessions on the V1 row.
+  const shareURL = createMemo(() => data.session.get(props.sessionID)?.share?.url ?? session()?.share?.url)
   const workspace = () => {
     const workspaceID = session()?.workspaceID
     if (!workspaceID) return
@@ -51,7 +55,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               mode="single_winner"
               session_id={props.sessionID}
               title={session()!.title}
-              share_url={session()!.share?.url}
+              share_url={shareURL()}
             >
               <box paddingRight={1}>
                 <text fg={theme.text}>
@@ -77,9 +81,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                     </Show>
                   </text>
                 </Show>
-                <Show when={session()!.share?.url}>
-                  <text fg={theme.textMuted}>{session()!.share!.url}</text>
-                </Show>
+                <Show when={shareURL()}>{(url) => <text fg={theme.textMuted}>{url()}</text>}</Show>
               </box>
             </pluginRuntime.Slot>
             <pluginRuntime.Slot name="sidebar_content" session_id={props.sessionID} />

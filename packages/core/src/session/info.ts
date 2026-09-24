@@ -11,7 +11,8 @@ import { SessionTable } from "./sql"
 import { SessionMessage } from "./message"
 import { Snapshot } from "../snapshot"
 
-export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.Info {
+/** `shareURL` comes from `session_share` (the source of truth for sharing), joined in by the caller. */
+export function fromRow(row: typeof SessionTable.$inferSelect, shareURL?: string | null): SessionSchema.Info {
   return SessionSchema.Info.make({
     id: SessionSchema.ID.make(row.id),
     projectID: ProjectV2.ID.make(row.project_id),
@@ -41,6 +42,7 @@ export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.In
     }),
     subpath: row.path ? RelativePath.make(row.path) : undefined,
     revert: row.revert ? { ...row.revert, messageID: SessionMessage.ID.make(row.revert.messageID) } : undefined,
+    share: shareURL ? { url: shareURL } : undefined,
     time: {
       created: DateTime.makeUnsafe(row.time_created),
       updated: DateTime.makeUnsafe(row.time_updated),

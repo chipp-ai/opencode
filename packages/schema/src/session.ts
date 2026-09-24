@@ -44,6 +44,8 @@ export const Info = Schema.Struct({
   location: Location.Ref,
   subpath: RelativePath.pipe(optional),
   revert: Revert.State.pipe(optional),
+  /** Present while the Session is published to the hosted share service. */
+  share: Schema.Struct({ url: Schema.String }).pipe(optional),
 }).annotate({ identifier: "SessionV2.Info" })
 
 export interface Rollup extends Schema.Schema.Type<typeof Rollup> {}

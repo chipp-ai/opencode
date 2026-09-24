@@ -31,6 +31,13 @@ const inputErrors = {
     ),
 }
 
+const shareErrors = {
+  "Session.NotFoundError": inputErrors["Session.NotFoundError"],
+  // Disabled sharing, a missing account token, and share backend failures all surface here.
+  "Session.ShareError": (error: SessionV2.ShareError) =>
+    Effect.fail(new ServiceUnavailableError({ message: error.message, service: "session.share" })),
+}
+
 export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handlers) =>
   Effect.gen(function* () {
     const session = yield* SessionV2.Service
@@ -328,6 +335,26 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
             ),
           )
           return HttpApiSchema.NoContent.make()
+        }),
+      )
+      .handle(
+        "session.share",
+        Effect.fn(function* (ctx) {
+          return {
+            data: yield* session
+              .share(ctx.params.sessionID)
+              .pipe(Effect.andThen(session.get(ctx.params.sessionID)), Effect.catchTags(shareErrors)),
+          }
+        }),
+      )
+      .handle(
+        "session.unshare",
+        Effect.fn(function* (ctx) {
+          return {
+            data: yield* session
+              .unshare(ctx.params.sessionID)
+              .pipe(Effect.andThen(session.get(ctx.params.sessionID)), Effect.catchTags(shareErrors)),
+          }
         }),
       )
       .handle(
