@@ -61,7 +61,7 @@ export type Result = {
   readonly cost: number
   readonly tokens: SessionMessage.Assistant["tokens"] | undefined
   readonly finish: string | undefined
-  readonly error: SessionMessage.UnknownError | undefined
+  readonly error: SessionMessage.AssistantError | undefined
   /** Set when the session was interrupted for exceeding `timeoutMs`. */
   readonly timedOut: boolean
 }

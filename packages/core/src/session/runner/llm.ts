@@ -5,7 +5,10 @@ import {
   LLMEvent,
   Message,
   SystemPart,
+  ToolCallPart,
+  ToolRuntime,
   isContextOverflowFailure,
+  toDefinitions,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
 import { Cause, DateTime, Effect, FiberSet, Layer, Option, Scope, Semaphore, Stream } from "effect"
@@ -40,6 +43,7 @@ import { createLLMEventPublisher } from "./publish-llm-event"
 import { toLLMMessages } from "./to-llm-message"
 import { SessionRunnerUsage } from "./usage"
 import { MAX_STEPS_PROMPT } from "./max-steps"
+import { SessionRunnerStructuredOutput } from "./structured-output"
 import { Snapshot } from "../../snapshot"
 import { makeLocationNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
@@ -66,7 +70,8 @@ import { llmClient } from "../../effect/app-node-platform"
  * - One provider turn
  *   - [x] Translate every projected V2 Session message variant into canonical
  *     `@opencode-ai/llm` messages.
- *   - [ ] Resolve policy-filtered built-in, MCP, plugin, and structured-output tool definitions.
+ *   - [ ] Resolve policy-filtered built-in, MCP, and plugin tool definitions.
+ *   - [x] Force a structured-output tool call while the newest user prompt requests a JSON Schema format.
  *   - [x] Stream exactly one `llm.stream(request)` provider turn.
  *   - [x] Persist assistant text and usage events incrementally as they arrive.
  *   - [ ] Persist snapshots, patches, and retry notices incrementally as they arrive.
@@ -241,6 +246,9 @@ const layer = Layer.effect(
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
       const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
+      // Forced on every step until satisfied, matching V1. On the final step it is the only advertised tool.
+      const format = SessionRunnerStructuredOutput.pending(context)
+      const structuredTools = format ? SessionRunnerStructuredOutput.make(format.schema) : undefined
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
       const request = LLM.request({
         model,
@@ -252,12 +260,23 @@ const layer = Layer.effect(
           },
         },
         providerOptions: { openai: { promptCacheKey } },
-        system: [agent.info?.system, system.baseline]
+        system: [agent.info?.system, system.baseline, format ? SessionRunnerStructuredOutput.SYSTEM_PROMPT : undefined]
           .filter((part): part is string => part !== undefined && part.length > 0)
           .map(SystemPart.make),
-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
-        tools: toolMaterialization?.definitions ?? [],
-        toolChoice: isLastStep ? "none" : undefined,
+        messages: [
+          ...toLLMMessages(context, model),
+          ...(isLastStep
+            ? [Message.assistant(format ? SessionRunnerStructuredOutput.MAX_STEPS_PROMPT : MAX_STEPS_PROMPT)]
+            : []),
+        ],
+        tools: [
+          // The ephemeral structured-output tool shadows any registered tool of the same name for this turn.
+          ...(toolMaterialization?.definitions ?? []).filter(
+            (definition) => !structuredTools || definition.name !== SessionRunnerStructuredOutput.NAME,
+          ),
+          ...(structuredTools ? toDefinitions(structuredTools) : []),
+        ],
+        toolChoice: structuredTools ? "required" : isLastStep ? "none" : undefined,
       })
       // Only the turn that promotes the first real user message titles the Session; transition retries never promote.
       if (promoted > 0 && SessionTitle.eligible(session, context))
@@ -280,6 +299,7 @@ const layer = Layer.effect(
         withPublication(publisher.publish(event, outputPaths))
       let overflowFailure: ProviderErrorEvent | undefined
       let fallbackFailure: ProviderErrorEvent | undefined
+      let structured: unknown
       const fallback = agent.info?.fallback ?? []
       const fallbackCircular = agent.info?.fallbackCircular ?? false
       const providerStream = llm.stream(request).pipe(
@@ -303,6 +323,24 @@ const layer = Layer.effect(
             }
             yield* publish(event)
             if (event.type !== "tool-call" || event.providerExecuted) return
+            if (structuredTools && event.name === SessionRunnerStructuredOutput.NAME) {
+              const settlement = yield* ToolRuntime.dispatch(
+                structuredTools,
+                ToolCallPart.make({ id: event.id, name: event.name, input: event.input }),
+              )
+              yield* publish(
+                LLMEvent.toolResult({
+                  id: event.id,
+                  name: event.name,
+                  result: settlement.result,
+                  output: settlement.output,
+                }),
+              )
+              if (settlement.result.type !== "error") structured = settlement.output?.structured
+              // A schema-violating call goes back to the model to retry, but never past the final step.
+              if (settlement.result.type === "error" && !isLastStep) needsContinuation = true
+              return
+            }
             if (!toolMaterialization) {
               yield* withPublication(publisher.failUnsettledTools("Tools are disabled after the maximum agent steps"))
               return
@@ -409,6 +447,14 @@ const layer = Layer.effect(
             const message = failure instanceof Error ? failure.message : String(failure)
             yield* withPublication(publisher.failUnsettledTools(`Tool execution failed: ${message}`))
           }
+          // Captured structured output ends the turn even when sibling tool calls would otherwise continue it.
+          const continues = !publisher.hasProviderError() && needsContinuation && structured === undefined
+          const unsatisfied =
+            format !== undefined &&
+            structured === undefined &&
+            !continues &&
+            stream._tag === "Success" &&
+            settled._tag === "Success"
           const stepSettlement = publisher.stepSettlement()
           if (stepSettlement && !publisher.hasProviderError()) {
             const endSnapshot = yield* snapshots.capture()
@@ -428,6 +474,15 @@ const layer = Layer.effect(
                 tokens: stepSettlement.tokens,
                 snapshot: endSnapshot,
                 files,
+                ...(structured === undefined ? {} : { structured }),
+                ...(unsatisfied
+                  ? {
+                      error: SessionMessage.StructuredOutputError.make({
+                        type: "structured_output",
+                        message: "Model did not produce structured output",
+                      }),
+                    }
+                  : {}),
               }),
             )
           }
@@ -438,7 +493,7 @@ const layer = Layer.effect(
           if (stream._tag === "Failure") return yield* Effect.failCause(stream.cause)
           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
             return yield* Effect.failCause(settled.cause)
-          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep }
+          return { needsContinuation: continues, step: currentStep }
         }),
       )
     }, Effect.scoped)

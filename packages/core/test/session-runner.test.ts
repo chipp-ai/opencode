@@ -3490,6 +3490,271 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  describe("structured output", () => {
+    const format = {
+      type: "json_schema" as const,
+      schema: {
+        $schema: "http://json-schema.org/draft-07/schema#",
+        type: "object",
+        properties: { answer: { type: "string" }, confidence: { type: "number" } },
+        required: ["answer", "confidence"],
+        additionalProperties: false,
+      },
+    }
+    const structuredCall = (id: string, input: unknown) => [
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.toolCall({ id, name: "StructuredOutput", input }),
+      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+      LLMEvent.finish({ reason: "tool-calls" }),
+    ]
+    const toolNames = (request: LLMRequest | undefined) => request?.tools.map((tool) => tool.name) ?? []
+
+    it.effect("captures a valid structured-output call and ends the turn", () =>
+      Effect.gen(function* () {
+        yield* setup
+        const session = yield* SessionV2.Service
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Answer", format }), resume: false })
+
+        requests.length = 0
+        executions.length = 0
+        responses = [
+          [
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.toolCall({ id: "call-echo", name: "echo", input: { text: "research" } }),
+            LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+            LLMEvent.finish({ reason: "tool-calls" }),
+          ],
+          structuredCall("call-structured", { answer: "42", confidence: 0.9 }),
+          // Must never be requested: a captured structured result ends the turn.
+          structuredCall("call-extra", { answer: "extra", confidence: 0 }),
+        ]
+
+        yield* session.resume(sessionID)
+
+        expect(requests).toHaveLength(2)
+        expect(executions).toEqual(["research"])
+        for (const request of requests) {
+          expect(request.toolChoice).toMatchObject({ type: "required" })
+          expect(toolNames(request)).toContain("echo")
+          expect(toolNames(request).filter((name) => name === "StructuredOutput")).toHaveLength(1)
+          expect(request.system.map((part) => part.text).join("\n")).toContain("requested structured output")
+        }
+        const advertised = requests[0]?.tools.find((tool) => tool.name === "StructuredOutput")
+        expect(advertised?.inputSchema).toEqual({
+          type: "object",
+          properties: { answer: { type: "string" }, confidence: { type: "number" } },
+          required: ["answer", "confidence"],
+          additionalProperties: false,
+        })
+        const expected = [
+          { type: "user", text: "Answer", format },
+          { type: "assistant", content: [{ type: "tool", name: "echo", state: { status: "completed" } }] },
+          {
+            type: "assistant",
+            finish: "tool-calls",
+            structured: { answer: "42", confidence: 0.9 },
+            content: [
+              {
+                type: "tool",
+                id: "call-structured",
+                name: "StructuredOutput",
+                state: {
+                  status: "completed",
+                  input: { answer: "42", confidence: 0.9 },
+                  content: [{ type: "text", text: "Structured output captured successfully." }],
+                },
+              },
+            ],
+          },
+        ]
+        const context = yield* session.context(sessionID)
+        expect(context).toMatchObject(expected)
+        expect(context).toHaveLength(3)
+        expect(context.at(-1)).not.toHaveProperty("error")
+
+        yield* replaySessionProjection(sessionID)
+        expect(yield* session.context(sessionID)).toMatchObject(expected)
+      }),
+    )
+
+    it.effect("returns a schema-violating call to the model and captures a valid retry", () =>
+      Effect.gen(function* () {
+        yield* setup
+        const session = yield* SessionV2.Service
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Answer", format }), resume: false })
+
+        requests.length = 0
+        responses = [
+          structuredCall("call-invalid", { answer: 42 }),
+          structuredCall("call-valid", { answer: "42", confidence: 1 }),
+        ]
+
+        yield* session.resume(sessionID)
+
+        expect(requests).toHaveLength(2)
+        expect(requests[1]?.toolChoice).toMatchObject({ type: "required" })
+        expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+        const context = yield* session.context(sessionID)
+        expect(context).toMatchObject([
+          { type: "user", text: "Answer" },
+          {
+            type: "assistant",
+            content: [
+              {
+                type: "tool",
+                id: "call-invalid",
+                state: { status: "error", error: { message: expect.stringContaining("Invalid tool input") } },
+              },
+            ],
+          },
+          {
+            type: "assistant",
+            structured: { answer: "42", confidence: 1 },
+            content: [{ type: "tool", id: "call-valid", state: { status: "completed" } }],
+          },
+        ])
+        expect(context[1]).not.toHaveProperty("structured")
+        expect(context[1]).not.toHaveProperty("error")
+      }),
+    )
+
+    it.effect("records a typed error when the step budget runs out without structured output", () =>
+      Effect.gen(function* () {
+        yield* setup
+        const agents = yield* AgentV2.Service
+        yield* agents.transform((editor) =>
+          editor.update(AgentV2.ID.make("build"), (agent) => {
+            agent.steps = 2
+          }),
+        )
+        const session = yield* SessionV2.Service
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Answer", format }), resume: false })
+
+        requests.length = 0
+        executions.length = 0
+        responses = [
+          [
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.toolCall({ id: "call-echo", name: "echo", input: { text: "research" } }),
+            LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+            LLMEvent.finish({ reason: "tool-calls" }),
+          ],
+          [
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.textStart({ id: "text-plain" }),
+            LLMEvent.textDelta({ id: "text-plain", text: "Plain answer" }),
+            LLMEvent.textEnd({ id: "text-plain" }),
+            LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+            LLMEvent.finish({ reason: "stop" }),
+          ],
+        ]
+
+        yield* session.resume(sessionID)
+
+        expect(requests).toHaveLength(2)
+        expect(executions).toEqual(["research"])
+        // The final step advertises only the structured-output tool, still forced.
+        expect(toolNames(requests[1])).toEqual(["StructuredOutput"])
+        expect(requests[1]?.toolChoice).toMatchObject({ type: "required" })
+        expect(requests[1]?.messages.at(-1)).toMatchObject({
+          role: "assistant",
+          content: [{ type: "text", text: expect.stringContaining("Call the StructuredOutput tool now") }],
+        })
+        const context = yield* session.context(sessionID)
+        expect(context).toMatchObject([
+          { type: "user", text: "Answer" },
+          { type: "assistant", content: [{ type: "tool", name: "echo" }] },
+          {
+            type: "assistant",
+            finish: "stop",
+            error: { type: "structured_output", message: "Model did not produce structured output" },
+            content: [{ type: "text", text: "Plain answer" }],
+          },
+        ])
+        expect(context[1]).not.toHaveProperty("error")
+        expect(context.at(-1)).not.toHaveProperty("structured")
+      }),
+    )
+
+    it.effect("records a typed error when the model answers in plain text", () =>
+      Effect.gen(function* () {
+        yield* setup
+        const session = yield* SessionV2.Service
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Answer", format }), resume: false })
+
+        requests.length = 0
+        response = fragmentFixture("text", "text-plain", ["Plain answer"]).completeEvents
+
+        yield* session.resume(sessionID)
+
+        expect(requests).toHaveLength(1)
+        expect(yield* session.context(sessionID)).toMatchObject([
+          { type: "user", text: "Answer" },
+          { type: "assistant", finish: "stop", error: { type: "structured_output" } },
+        ])
+      }),
+    )
+
+    it.effect("leaves plain prompts and later unformatted prompts unaffected", () =>
+      Effect.gen(function* () {
+        yield* setup
+        const session = yield* SessionV2.Service
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Structured", format }), resume: false })
+        requests.length = 0
+        response = structuredCall("call-structured", { answer: "42", confidence: 1 })
+        yield* session.resume(sessionID)
+
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Plain" }), resume: false })
+        requests.length = 0
+        response = fragmentFixture("text", "text-plain", ["Plain answer"]).completeEvents
+        yield* session.resume(sessionID)
+
+        expect(requests).toHaveLength(1)
+        expect(requests[0]?.toolChoice).toBeUndefined()
+        expect(toolNames(requests[0])).not.toContain("StructuredOutput")
+        expect(toolNames(requests[0])).toContain("echo")
+        expect(requests[0]?.system.map((part) => part.text).join("\n")).not.toContain("structured output")
+        const context = yield* session.context(sessionID)
+        expect(context.at(-2)).toMatchObject({ type: "user", text: "Plain" })
+        expect(context.at(-2)).not.toHaveProperty("format")
+        expect(context.at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+        expect(context.at(-1)).not.toHaveProperty("error")
+        expect(context.at(-1)).not.toHaveProperty("structured")
+      }),
+    )
+
+    it.effect("keeps a StructuredOutput tool call on a plain prompt as an ordinary unknown tool", () =>
+      Effect.gen(function* () {
+        yield* setup
+        const session = yield* SessionV2.Service
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Plain" }), resume: false })
+
+        requests.length = 0
+        responses = [
+          structuredCall("call-structured", { answer: "42" }),
+          fragmentFixture("text", "text-final", ["Done"]).completeEvents,
+        ]
+
+        yield* session.resume(sessionID)
+
+        expect(requests).toHaveLength(2)
+        expect(requests[0]?.toolChoice).toBeUndefined()
+        const context = yield* session.context(sessionID)
+        expect(context).toMatchObject([
+          { type: "user", text: "Plain" },
+          {
+            type: "assistant",
+            content: [
+              { type: "tool", state: { status: "error", error: { message: "Unknown tool: StructuredOutput" } } },
+            ],
+          },
+          { type: "assistant", finish: "stop" },
+        ])
+        expect(context[1]).not.toHaveProperty("structured")
+      }),
+    )
+  })
+
   it.effect("resets the configured step allowance when steering input promotes", () =>
     Effect.gen(function* () {
       yield* setup

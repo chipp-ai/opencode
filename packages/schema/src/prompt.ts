@@ -37,21 +37,30 @@ export const AgentAttachment = Schema.Struct({
   source: Source.pipe(optional),
 }).annotate({ identifier: "Prompt.AgentAttachment" })
 
+/** Forces the answer to this prompt through a tool call whose arguments match `schema`. Absent means plain text. */
+export interface Format extends Schema.Schema.Type<typeof Format> {}
+export const Format = Schema.Struct({
+  type: Schema.Literal("json_schema"),
+  schema: Schema.Record(Schema.String, Schema.Unknown),
+}).annotate({ identifier: "Prompt.Format" })
+
 export interface Prompt extends Schema.Schema.Type<typeof Prompt> {}
 export const Prompt = Schema.Struct({
   text: Schema.String,
   files: Schema.Array(FileAttachment).pipe(optional),
   agents: Schema.Array(AgentAttachment).pipe(optional),
+  format: Format.pipe(optional),
 })
   .annotate({ identifier: "Prompt" })
   .pipe(
     statics((schema) => ({
       equivalence: Schema.toEquivalence(schema),
-      fromUserMessage: (input: Pick<Prompt, "text" | "files" | "agents">) =>
+      fromUserMessage: (input: Pick<Prompt, "text" | "files" | "agents" | "format">) =>
         schema.make({
           text: input.text,
           ...(input.files === undefined ? {} : { files: input.files }),
           ...(input.agents === undefined ? {} : { agents: input.agents }),
+          ...(input.format === undefined ? {} : { format: input.format }),
         }),
     })),
   )

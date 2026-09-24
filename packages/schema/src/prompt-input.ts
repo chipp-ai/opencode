@@ -1,7 +1,7 @@
 export * as PromptInput from "./prompt-input"
 
 import { Schema } from "effect"
-import { AgentAttachment, Source } from "./prompt"
+import { AgentAttachment, Format, Source } from "./prompt"
 import { optional, statics } from "./schema"
 
 export interface FileAttachment extends Schema.Schema.Type<typeof FileAttachment> {}
@@ -23,4 +23,5 @@ export const Prompt = Schema.Struct({
   text: Schema.String,
   files: Schema.Array(FileAttachment).pipe(optional),
   agents: Schema.Array(AgentAttachment).pipe(optional),
+  format: Format.pipe(optional),
 }).annotate({ identifier: "PromptInput" })

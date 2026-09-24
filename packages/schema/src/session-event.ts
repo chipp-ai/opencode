@@ -211,6 +211,10 @@ export namespace Step {
       }),
       snapshot: Schema.String.pipe(optional),
       files: Schema.Array(RelativePath).pipe(optional),
+      // Structured-output outcome for a turn answering a formatted prompt. Additive and optional, so
+      // earlier version-2 events still decode.
+      structured: Schema.Unknown.pipe(optional),
+      error: SessionMessage.StructuredOutputError.pipe(optional),
     },
   })
   export type Ended = typeof Ended.Type

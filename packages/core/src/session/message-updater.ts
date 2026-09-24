@@ -132,6 +132,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             text: event.data.prompt.text,
             files: event.data.prompt.files,
             agents: event.data.prompt.agents,
+            format: event.data.prompt.format,
             time: { created: event.data.timestamp },
           }),
         )
@@ -214,6 +215,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           draft.finish = event.data.finish
           draft.cost = event.data.cost
           draft.tokens = event.data.tokens
+          if (event.data.structured !== undefined) draft.structured = event.data.structured
+          if (event.data.error) draft.error = event.data.error
           if (event.data.snapshot || event.data.files)
             draft.snapshot = {
               ...draft.snapshot,

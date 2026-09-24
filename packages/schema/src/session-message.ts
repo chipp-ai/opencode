@@ -21,6 +21,18 @@ export const UnknownError = Schema.Struct({
   message: Schema.String,
 }).annotate({ identifier: "Session.Error.Unknown" })
 
+/** The prompt requested structured output, but the turn ended without a valid structured-output tool call. */
+export interface StructuredOutputError extends Schema.Schema.Type<typeof StructuredOutputError> {}
+export const StructuredOutputError = Schema.Struct({
+  type: Schema.Literal("structured_output"),
+  message: Schema.String,
+}).annotate({ identifier: "Session.Error.StructuredOutput" })
+
+export const AssistantError = Schema.Union([UnknownError, StructuredOutputError])
+  .pipe(Schema.toTaggedUnion("type"))
+  .annotate({ identifier: "Session.Error" })
+export type AssistantError = UnknownError | StructuredOutputError
+
 const Base = {
   id: ID,
   metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(optional),
@@ -47,6 +59,7 @@ export const User = Schema.Struct({
   text: Prompt.fields.text,
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,
+  format: Prompt.fields.format,
   type: Schema.Literal("user"),
 }).annotate({ identifier: "Session.Message.User" })
 
@@ -181,7 +194,9 @@ export const Assistant = Schema.Struct({
     reasoning: Schema.Finite,
     cache: Schema.Struct({ read: Schema.Finite, write: Schema.Finite }),
   }).pipe(optional),
-  error: UnknownError.pipe(optional),
+  /** The validated structured-output tool arguments, when the answered prompt requested a format. */
+  structured: Schema.Unknown.pipe(optional),
+  error: AssistantError.pipe(optional),
   time: Schema.Struct({
     created: DateTimeUtcFromMillis,
     completed: DateTimeUtcFromMillis.pipe(optional),

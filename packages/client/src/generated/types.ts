@@ -438,6 +438,7 @@ export type SessionsPromptInput = {
         readonly name: string
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
+      readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
     }
     readonly delivery?: "steer" | "queue" | null
     readonly resume?: boolean | null
@@ -456,6 +457,7 @@ export type SessionsPromptInput = {
         readonly name: string
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
+      readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
     }
     readonly delivery?: "steer" | "queue" | null
     readonly resume?: boolean | null
@@ -474,6 +476,7 @@ export type SessionsPromptInput = {
         readonly name: string
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
+      readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
     }
     readonly delivery?: "steer" | "queue" | null
     readonly resume?: boolean | null
@@ -492,6 +495,7 @@ export type SessionsPromptInput = {
         readonly name: string
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
+      readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
     }
     readonly delivery?: "steer" | "queue" | null
     readonly resume?: boolean | null
@@ -516,6 +520,7 @@ export type SessionsPromptOutput = {
         readonly name: string
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
+      readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
     }
     readonly delivery: "steer" | "queue"
     readonly timeCreated: number
@@ -544,6 +549,7 @@ export type SessionsListInputsOutput = {
         readonly name: string
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
+      readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
     }
     readonly delivery: "steer" | "queue"
     readonly timeCreated: number
@@ -568,6 +574,7 @@ export type SessionsReviseInputInput = {
         readonly name: string
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
+      readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
     }
   }["prompt"]
 }
@@ -590,6 +597,7 @@ export type SessionsReviseInputOutput = {
         readonly name: string
         readonly source?: { readonly start: number; readonly end: number; readonly text: string }
       }>
+      readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
     }
     readonly delivery: "steer" | "queue"
     readonly timeCreated: number
@@ -698,6 +706,7 @@ export type SessionsContextOutput = {
           readonly name: string
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
+        readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
         readonly type: "user"
       }
     | {
@@ -806,7 +815,10 @@ export type SessionsContextOutput = {
           readonly reasoning: number
           readonly cache: { readonly read: number; readonly write: number }
         }
-        readonly error?: { readonly type: "unknown"; readonly message: string }
+        readonly structured?: JsonValue
+        readonly error?:
+          | { readonly type: "unknown"; readonly message: string }
+          | { readonly type: "structured_output"; readonly message: string }
       }
     | {
         readonly type: "compaction"
@@ -898,6 +910,7 @@ export type SessionsHistoryOutput = {
               readonly name: string
               readonly source?: { readonly start: number; readonly end: number; readonly text: string }
             }>
+            readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
           }
           readonly delivery: "steer" | "queue"
         }
@@ -925,6 +938,7 @@ export type SessionsHistoryOutput = {
               readonly name: string
               readonly source?: { readonly start: number; readonly end: number; readonly text: string }
             }>
+            readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
           }
           readonly delivery: "steer" | "queue"
         }
@@ -960,6 +974,7 @@ export type SessionsHistoryOutput = {
               readonly name: string
               readonly source?: { readonly start: number; readonly end: number; readonly text: string }
             }>
+            readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
           }
         }
       }
@@ -1051,6 +1066,8 @@ export type SessionsHistoryOutput = {
           }
           readonly snapshot?: string
           readonly files?: ReadonlyArray<string>
+          readonly structured?: JsonValue
+          readonly error?: { readonly type: "structured_output"; readonly message: string }
         }
       }
     | {
@@ -1398,6 +1415,7 @@ export type SessionsEventsOutput =
             readonly name: string
             readonly source?: { readonly start: number; readonly end: number; readonly text: string }
           }>
+          readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: unknown } }
         }
         readonly delivery: "steer" | "queue"
       }
@@ -1425,6 +1443,7 @@ export type SessionsEventsOutput =
             readonly name: string
             readonly source?: { readonly start: number; readonly end: number; readonly text: string }
           }>
+          readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: unknown } }
         }
         readonly delivery: "steer" | "queue"
       }
@@ -1460,6 +1479,7 @@ export type SessionsEventsOutput =
             readonly name: string
             readonly source?: { readonly start: number; readonly end: number; readonly text: string }
           }>
+          readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: unknown } }
         }
       }
     }
@@ -1551,6 +1571,8 @@ export type SessionsEventsOutput =
         }
         readonly snapshot?: string
         readonly files?: ReadonlyArray<string>
+        readonly structured?: unknown
+        readonly error?: { readonly type: "structured_output"; readonly message: string }
       }
     }
   | {
@@ -1860,6 +1882,7 @@ export type SessionsMessageOutput = {
           readonly name: string
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
+        readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
         readonly type: "user"
       }
     | {
@@ -1968,7 +1991,10 @@ export type SessionsMessageOutput = {
           readonly reasoning: number
           readonly cache: { readonly read: number; readonly write: number }
         }
-        readonly error?: { readonly type: "unknown"; readonly message: string }
+        readonly structured?: JsonValue
+        readonly error?:
+          | { readonly type: "unknown"; readonly message: string }
+          | { readonly type: "structured_output"; readonly message: string }
       }
     | {
         readonly type: "compaction"
@@ -2032,6 +2058,7 @@ export type MessagesListOutput = {
           readonly name: string
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
+        readonly format?: { readonly type: "json_schema"; readonly schema: { readonly [x: string]: JsonValue } }
         readonly type: "user"
       }
     | {
@@ -2140,7 +2167,10 @@ export type MessagesListOutput = {
           readonly reasoning: number
           readonly cache: { readonly read: number; readonly write: number }
         }
-        readonly error?: { readonly type: "unknown"; readonly message: string }
+        readonly structured?: JsonValue
+        readonly error?:
+          | { readonly type: "unknown"; readonly message: string }
+          | { readonly type: "structured_output"; readonly message: string }
       }
     | {
         readonly type: "compaction"
