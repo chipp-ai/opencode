@@ -3,6 +3,7 @@ import { pathToFileURL, fileURLToPath } from "url"
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter } from "vscode-jsonrpc/node"
 import type { Diagnostic as VSCodeDiagnostic } from "vscode-languageserver-types"
 import { Process } from "@/util/process"
+import { ProcessTree } from "@opencode-ai/core/util/process-tree"
 import { LANGUAGE_EXTENSIONS } from "./language"
 import { Effect, Schema } from "effect"
 import type * as LSPServer from "./server"
@@ -16,6 +17,7 @@ const DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS = 10_000
 const DIAGNOSTICS_REQUEST_TIMEOUT_MS = 3_000
 
 const INITIALIZE_TIMEOUT_MS = 45_000
+const SHUTDOWN_REQUEST_TIMEOUT_MS = 1_500
 
 // LSP spec constants
 const FILE_CHANGE_CREATED = 1
@@ -637,10 +639,23 @@ export async function create(input: {
       }
       await waitForFullDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
     },
+    get pid() {
+      return input.server.process.pid
+    },
     async shutdown() {
+      // Read the tree before any shutdown signal: a server that exits promptly reparents its
+      // own children (tsserver, helpers) to init, which hides them from a later ppid walk.
+      const rows = await ProcessTree.table()
+      await withTimeout(
+        Promise.resolve()
+          .then(() => connection.sendRequest("shutdown"))
+          .then(() => connection.sendNotification("exit")),
+        SHUTDOWN_REQUEST_TIMEOUT_MS,
+      ).catch(() => undefined)
       connection.end()
       connection.dispose()
       await Process.stop(input.server.process)
+      await ProcessTree.killTree(input.server.process.pid, { rows })
     },
   }
 
