@@ -4,6 +4,7 @@ node_modules
 .sst
 .env
 .env.local
+.env.rtf
 .idea
 .vscode
 .codex
