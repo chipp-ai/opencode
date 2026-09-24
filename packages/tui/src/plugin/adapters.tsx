@@ -4,6 +4,7 @@ import type { useEvent } from "../context/event"
 import type { useRoute } from "../context/route"
 import type { useSDK } from "../context/sdk"
 import type { useSync } from "../context/sync"
+import type { useData } from "../context/data"
 import type { useTheme } from "../context/theme"
 import { Dialog as DialogUI, type useDialog } from "../ui/dialog"
 import type { useOpencodeKeymap } from "../keymap"
@@ -16,6 +17,7 @@ import { Prompt } from "../component/prompt"
 import type { useToast } from "../ui/toast"
 import * as Keymap from "../keymap"
 import { createCommandShim } from "./command-shim"
+import { isV2Session, toV1Transcript } from "../util/v2-session"
 import type { PluginRoutes } from "./api"
 export type { RouteMap } from "./api"
 export { createPluginRoutes, createTuiApi } from "./api"
@@ -31,6 +33,7 @@ type Input = {
   event: ReturnType<typeof useEvent>
   sdk: ReturnType<typeof useSDK>
   sync: ReturnType<typeof useSync>
+  data: ReturnType<typeof useData>
   theme: ReturnType<typeof useTheme>
   toast: ReturnType<typeof useToast>
   renderer: TuiPluginApi["renderer"]
@@ -95,7 +98,7 @@ function mapOptionCb<Value>(cb?: (item: TuiDialogSelectOption<Value>) => void) {
   return (item: SelectOption<Value>) => cb(pickOption(item))
 }
 
-function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
+function stateApi(sync: ReturnType<typeof useSync>, data: ReturnType<typeof useData>): TuiPluginApi["state"] {
   return {
     get ready() {
       return sync.ready
@@ -135,7 +138,24 @@ function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
         return sync.data.todo[sessionID] ?? []
       },
       messages(sessionID) {
-        return sync.data.message[sessionID] ?? []
+        const legacy = sync.data.message[sessionID] ?? []
+        if (
+          !isV2Session({
+            enabled: sync.data.capabilities.experimentalV2Session,
+            legacyMessageCount: legacy.length,
+          })
+        )
+          return legacy
+        // V2 sessions never write into the legacy message store, so project their transcript into the
+        // V1 shape the plugin API promises. Parts stay legacy-only; `part(messageID)` is unchanged.
+        const info = data.session.get(sessionID)
+        return toV1Transcript({
+          sessionID,
+          directory: sync.session.get(sessionID)?.directory ?? "",
+          messages: data.session.message.list(sessionID) ?? [],
+          agent: info?.agent,
+          model: info?.model,
+        }).messages
       },
       status(sessionID) {
         return sync.data.session_status[sessionID]
@@ -300,7 +320,7 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
         return input.kv.ready
       },
     },
-    state: stateApi(input.sync),
+    state: stateApi(input.sync, input.data),
     get client() {
       return input.sdk.client
     },

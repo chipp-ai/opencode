@@ -1,7 +1,8 @@
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
-import { createMemo, Show } from "solid-js"
+import { createEffect, createMemo, Show } from "solid-js"
+import { useData } from "../../context/data"
 
 const id = "internal:sidebar-context"
 
@@ -11,11 +12,23 @@ const money = new Intl.NumberFormat("en-US", {
 })
 
 function View(props: { api: TuiPluginApi; session_id: string }) {
+  const data = useData()
   const theme = () => props.api.theme.current
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
   const session = createMemo(() => props.api.state.session.get(props.session_id))
-  const cost = createMemo(() => session()?.cost ?? 0)
+  // V2 spend lives on the server-side rollup rather than legacy session rows, which the plugin API does not expose.
+  const v2 = createMemo(() => (data.session.message.list(props.session_id)?.length ?? 0) > 0)
+  createEffect(() => {
+    if (!v2()) return
+    void data.session.cost.refresh(props.session_id).catch(() => {})
+  })
+  const rollup = createMemo(() => (v2() ? data.session.cost.get(props.session_id) : undefined))
+  const cost = createMemo(() => {
+    if (v2()) return rollup()?.cost ?? 0
+    return session()?.cost ?? 0
+  })
   const subagents = createMemo(() => {
+    if (v2()) return rollup()?.subagents.cost ?? 0
     const visited = new Set<string>([props.session_id])
     const walk = (sessionID: string): number =>
       props.api.state.session
