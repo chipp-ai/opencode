@@ -75,7 +75,7 @@ registerOpencodeSpinner()
 
 export type PromptProps = {
   sessionID?: string
-  /** The session at `sessionID` runs on the experimental V2 session API. */
+  /** The session at `sessionID` runs on the V2 session API. */
   v2?: boolean
   visible?: boolean
   disabled?: boolean

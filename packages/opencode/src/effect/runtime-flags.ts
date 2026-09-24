@@ -50,7 +50,9 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   experimentalEventSystem: enabledByExperimental("OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"),
   experimentalWorkspaces: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
   experimentalIconDiscovery: enabledByExperimental("OPENCODE_EXPERIMENTAL_ICON_DISCOVERY"),
-  experimentalV2Session: enabledByExperimental("OPENCODE_EXPERIMENTAL_V2_SESSION"),
+  // V2 sessions are the default and no longer follow OPENCODE_EXPERIMENTAL; the legacy env var name
+  // is kept as the opt-out escape hatch (OPENCODE_EXPERIMENTAL_V2_SESSION=false falls back to V1).
+  experimentalV2Session: Config.boolean("OPENCODE_EXPERIMENTAL_V2_SESSION").pipe(Config.withDefault(true)),
   outputTokenMax: positiveInteger("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"),
   bashDefaultTimeoutMs: positiveInteger("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),

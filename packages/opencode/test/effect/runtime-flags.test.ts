@@ -218,30 +218,34 @@ describe("RuntimeFlags", () => {
     }),
   )
 
-  it.effect("experimentalV2Session defaults to false", () =>
+  it.effect("experimentalV2Session defaults to true", () =>
     Effect.gen(function* () {
       const flags = yield* readFlags.pipe(Effect.provide(fromConfig({})))
-
-      expect(flags.experimentalV2Session).toBe(false)
-    }),
-  )
-
-  it.effect("experimentalV2Session reads OPENCODE_EXPERIMENTAL_V2_SESSION", () =>
-    Effect.gen(function* () {
-      const flags = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL_V2_SESSION: "true" })))
 
       expect(flags.experimentalV2Session).toBe(true)
     }),
   )
 
-  it.effect("experimentalV2Session inherits OPENCODE_EXPERIMENTAL and can be opted out", () =>
+  it.effect("experimentalV2Session can be opted out with OPENCODE_EXPERIMENTAL_V2_SESSION", () =>
     Effect.gen(function* () {
-      const umbrella = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true" })))
+      const zero = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL_V2_SESSION: "0" })))
+      const disabled = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL_V2_SESSION: "false" })))
+      const enabled = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL_V2_SESSION: "true" })))
+
+      expect(zero.experimentalV2Session).toBe(false)
+      expect(disabled.experimentalV2Session).toBe(false)
+      expect(enabled.experimentalV2Session).toBe(true)
+    }),
+  )
+
+  it.effect("experimentalV2Session ignores OPENCODE_EXPERIMENTAL", () =>
+    Effect.gen(function* () {
+      const umbrellaOff = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "false" })))
       const optedOut = yield* readFlags.pipe(
         Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true", OPENCODE_EXPERIMENTAL_V2_SESSION: "false" })),
       )
 
-      expect(umbrella.experimentalV2Session).toBe(true)
+      expect(umbrellaOff.experimentalV2Session).toBe(true)
       expect(optedOut.experimentalV2Session).toBe(false)
     }),
   )

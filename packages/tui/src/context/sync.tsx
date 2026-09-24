@@ -509,6 +509,8 @@ export const {
               setStore("provider_default", reconcile(providers.default))
               setStore("provider_next", reconcile(providerList))
               setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
+              // Servers default to V2, but fall back to V1 when the server has not confirmed it (failed
+              // fetch, older server, or explicit opt-out) since V1 works against every server.
               setStore("capabilities", "experimentalV2Session", capabilities?.v2Session === true)
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))

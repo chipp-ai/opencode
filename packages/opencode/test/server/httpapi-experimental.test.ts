@@ -156,9 +156,9 @@ describe("experimental HttpApi", () => {
           { concurrency: "unbounded" },
         )
 
-        // Experimental session modes stay off unless explicitly enabled, so clients default to V1.
+        // V2 sessions are on by default, so clients start new sessions in V2 unless the server opts out.
         expect(capabilities.status).toBe(200)
-        expect(yield* json(capabilities)).toMatchObject({ v2Session: false })
+        expect(yield* json(capabilities)).toMatchObject({ v2Session: true })
 
         expect(consoleState.status).toBe(200)
         expect(yield* json(consoleState)).toEqual({
