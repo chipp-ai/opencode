@@ -75,6 +75,7 @@ import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@opencode-ai/
 import { serveUIEffect } from "@/server/shared/ui"
 import { ServerAuth } from "@/server/auth"
 import { InstanceHttpApi, RootHttpApi } from "./api"
+import type { RouteExtension } from "./extension"
 import { Api } from "@opencode-ai/server/api"
 import { PublicApi } from "./public"
 import {
@@ -136,9 +137,10 @@ const cors = (corsOptions?: CorsOptions) =>
 // - eventApiRoutes: typed SSE route with instance routing context and its existing API contract.
 // - ptyConnectApiRoutes: typed WebSocket upgrade route with ticket-aware auth.
 // - instanceApiRoutes: remaining typed instance routes.
+// - routeExtensions: embedder-supplied standalone HttpApis, each declaring its own middleware.
 // - uiRoute: raw catch-all fallback; auth is router middleware so public static assets can bypass it.
 const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provide(ServerAuth.Config.layer))
-const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
+export const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
 const ptyConnectHttpApiAuthLayer = ptyConnectAuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
 const serverHttpApiAuthLayer = serverAuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
 const workspaceRoutingLive = workspaceRoutingLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal))
@@ -273,8 +275,16 @@ const app = LayerNode.group([
   WorkflowRegistry.node,
 ])
 
+// Services an extension's routes may require from the server composition; anything else
+// must be provided by the extension itself.
+export type RouteExtensionServices =
+  | RouteRequirements
+  | Layer.Success<typeof HttpServer.layerServices>
+  | LayerNode.Output<typeof app>
+
 export function createRoutes(
   corsOptions?: CorsOptions,
+  routeExtensions: ReadonlyArray<RouteExtension.RouteExtension> = [],
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
   // Real implementation of the `SessionDispatchPort` unbound node the `task` tool depends on
   // (see `@opencode-ai/core/session/dispatch-port`'s own doc comment for why it exists). A *raw*
@@ -298,6 +308,7 @@ export function createRoutes(
     instanceRoutes,
     serverRoutes,
     docRoute,
+    ...routeExtensions,
     uiRoute,
   ).pipe(
     Layer.provide([
