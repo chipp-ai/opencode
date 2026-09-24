@@ -609,6 +609,27 @@ export type SessionsCompactInput = { readonly sessionID: { readonly sessionID: s
 
 export type SessionsCompactOutput = void
 
+export type SessionsShellInput = {
+  readonly sessionID: { readonly sessionID: string }["sessionID"]
+  readonly id?: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly resume?: boolean | undefined
+  }["id"]
+  readonly command: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly resume?: boolean | undefined
+  }["command"]
+  readonly resume?: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly resume?: boolean | undefined
+  }["resume"]
+}
+
+export type SessionsShellOutput = void
+
 export type SessionsWaitInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
 
 export type SessionsWaitOutput = void

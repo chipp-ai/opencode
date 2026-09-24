@@ -235,6 +235,31 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         }),
       )
       .handle(
+        "session.shell",
+        Effect.fn(function* (ctx) {
+          yield* session
+            .shell({
+              sessionID: ctx.params.sessionID,
+              id: ctx.payload.id,
+              command: ctx.payload.command,
+              resume: ctx.payload.resume,
+            })
+            .pipe(
+              Effect.catchTags({
+                "Session.NotFoundError": inputErrors["Session.NotFoundError"],
+                "Session.BusyError": (error) =>
+                  Effect.fail(
+                    new ConflictError({
+                      message: `Session is busy: ${error.sessionID}`,
+                      resource: error.sessionID,
+                    }),
+                  ),
+              }),
+            )
+          return HttpApiSchema.NoContent.make()
+        }),
+      )
+      .handle(
         "session.compact",
         Effect.fn(function* (ctx) {
           yield* session.compact({ sessionID: ctx.params.sessionID }).pipe(

@@ -546,6 +546,14 @@ describe("session HttpApi", () => {
         expect(compact.status).toBe(404)
         expect(yield* responseJson(compact)).toEqual(expected)
 
+        const shell = yield* request(`/api/session/${missing}/shell`, {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({ command: "pwd" }),
+        })
+        expect(shell.status).toBe(404)
+        expect(yield* responseJson(shell)).toEqual(expected)
+
         const wait = yield* request(`/api/session/${missing}/wait`, { method: "POST", headers })
         expect(wait.status).toBe(404)
         expect(yield* responseJson(wait)).toEqual(expected)
@@ -704,6 +712,71 @@ describe("session HttpApi", () => {
         headers,
       })
       expect(context.data[0]).toMatchObject({ type: "compaction", summary: "## Objective\n- manual summary" })
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
+
+  it.live("runs a user shell command in a v2 session end-to-end", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      const directory = yield* tmpdirScoped({ git: true })
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(directory, "opencode.json"),
+          JSON.stringify({
+            providers: {
+              test: {
+                api: { type: "aisdk", package: "@ai-sdk/openai-compatible", url: llm.url, settings: {} },
+                request: { body: { apiKey: "test-key" } },
+                models: { "test-model": { limit: { context: 100_000, output: 10_000 } } },
+              },
+            },
+          }),
+        ),
+      )
+      const headers = { "x-opencode-directory": directory }
+      const created = yield* requestJson<{ data: { id: string } }>("/api/session", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ model: { providerID: "test", id: "test-model" }, location: { directory } }),
+      })
+      const session = created.data
+      yield* pollWithTimeout(
+        requestJson<{ data: { id: string }[] }>("/api/provider", { headers }).pipe(
+          Effect.map(({ data }) => data.find((provider) => provider.id === "test")),
+        ),
+        "configured test provider never reached the V2 catalog",
+      )
+
+      const shell = yield* request(`/api/session/${session.id}/shell`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ command: "echo http-shell-ok" }),
+      })
+      expect(shell.status).toBe(204)
+      expect(yield* llm.hits).toHaveLength(0)
+      const context = yield* requestJson<{ data: SessionMessage.Message[] }>(`/api/session/${session.id}/context`, {
+        headers,
+      })
+      expect(context.data).toHaveLength(1)
+      expect(context.data[0]).toMatchObject({ type: "shell", command: "echo http-shell-ok" })
+      expect(JSON.stringify(context.data[0])).toContain("http-shell-ok\\n")
+
+      yield* llm.text("saw the shell output", { usage: { input: 1, output: 1 } })
+      const resumed = yield* request(`/api/session/${session.id}/shell`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ command: "echo resumed-shell", resume: true }),
+      })
+      expect(resumed.status).toBe(204)
+      const waited = yield* request(`/api/session/${session.id}/wait`, { method: "POST", headers })
+      expect(waited.status).toBe(204)
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(1)
+      expect(JSON.stringify(hits[0].body)).toContain("Shell command: echo resumed-shell")
+      const after = yield* requestJson<{ data: SessionMessage.Message[] }>(`/api/session/${session.id}/context`, {
+        headers,
+      })
+      expect(after.data.map((message) => message.type)).toEqual(["shell", "shell", "assistant"])
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 

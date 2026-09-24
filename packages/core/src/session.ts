@@ -1,7 +1,8 @@
 export * as SessionV2 from "./session"
 export * from "./session/schema"
 
-import { DateTime, Effect, Layer, Schema, Context, Stream } from "effect"
+import { DateTime, Duration, Effect, Layer, Schema, Context, Stream } from "effect"
+import { ChildProcess } from "effect/unstable/process"
 import { ListAnchor } from "@opencode-ai/schema/session"
 import { and, asc, desc, eq, gt, like, lt, or, type SQL } from "drizzle-orm"
 import { ProjectV2 } from "./project"
@@ -45,6 +46,9 @@ import { SessionHistory } from "./session/history"
 import { SessionRunnerModel } from "./session/runner/model"
 import { Config } from "./config"
 import { llmClient } from "./effect/app-node-platform"
+import { AppProcess } from "./process"
+import { Shell } from "./shell"
+import { Identifier } from "./id/id"
 
 export const RevertState = Revert.State
 export type RevertState = Revert.State
@@ -114,6 +118,9 @@ export class PromptConflictError extends Schema.TaggedErrorClass<PromptConflictE
   sessionID: SessionSchema.ID,
   messageID: SessionMessage.ID,
 }) {}
+export class BusyError extends Schema.TaggedErrorClass<BusyError>()("Session.BusyError", {
+  sessionID: SessionSchema.ID,
+}) {}
 export class InputNotPendingError extends Schema.TaggedErrorClass<InputNotPendingError>()(
   "Session.InputNotPendingError",
   {
@@ -130,6 +137,7 @@ export type Error =
   | OperationUnavailableError
   | PromptConflictError
   | InputNotPendingError
+  | BusyError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
@@ -191,7 +199,7 @@ export interface Interface {
     sessionID: SessionSchema.ID
     command: string
     resume?: boolean
-  }) => Effect.Effect<void, OperationUnavailableError>
+  }) => Effect.Effect<void, NotFoundError | BusyError>
   readonly skill: (input: {
     id?: EventV2.ID
     sessionID: SessionSchema.ID
@@ -227,6 +235,7 @@ const layer = Layer.effect(
     const store = yield* SessionStore.Service
     const locations = yield* LocationServiceMap.Service
     const llm = yield* LLMClient.Service
+    const appProcess = yield* AppProcess.Service
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
     const decode = (row: typeof SessionMessageTable.$inferSelect) =>
@@ -462,8 +471,45 @@ const layer = Layer.effect(
         if (!revised) return yield* Effect.die("Revised session input is missing")
         return revised
       }),
-      shell: Effect.fn("V2Session.shell")(function* () {
-        return yield* new OperationUnavailableError({ operation: "shell" })
+      // A user-typed command: no model call and no permission gate, since the human is the caller.
+      shell: Effect.fn("V2Session.shell")(function* (input) {
+        const session = yield* result.get(input.sessionID)
+        // Only rejects an already-running drain; input admitted during the command may still start one.
+        if ((yield* execution.active).has(session.id)) return yield* new BusyError({ sessionID: session.id })
+        const shell = yield* Effect.gen(function* () {
+          const config = yield* Config.Service
+          return Shell.preferred(Config.latest(yield* config.entries(), "shell"))
+        }).pipe(Effect.provide(locations.get(session.location)), Effect.orDie)
+        const callID = Identifier.create("shell", "ascending")
+        yield* events.publish(
+          SessionEvent.Shell.Started,
+          {
+            sessionID: session.id,
+            messageID: SessionMessage.ID.create(),
+            timestamp: yield* DateTime.now,
+            callID,
+            command: input.command,
+          },
+          { id: input.id },
+        )
+        const end = (output: string) =>
+          Effect.gen(function* () {
+            yield* events.publish(SessionEvent.Shell.Ended, {
+              sessionID: session.id,
+              timestamp: yield* DateTime.now,
+              callID,
+              output,
+            })
+          })
+        const output = yield* runShell(appProcess, shell, input.command, session.location.directory).pipe(
+          Effect.onInterrupt(() => end("[command interrupted]")),
+        )
+        yield* end(output)
+        if (input.resume !== true) return
+        // `wake` only drains pending input, so answering the shell output needs a forced run. Detached so
+        // the caller is not held for the model turn; the drain is registered before this returns, and
+        // its failures are already logged by the execution owner.
+        yield* execution.resume(session.id).pipe(Effect.ignore, Effect.forkDetach({ startImmediately: true }))
       }),
       skill: Effect.fn("V2Session.skill")(function* () {
         return yield* new OperationUnavailableError({ operation: "skill" })
@@ -558,6 +604,39 @@ const layer = Layer.effect(
   }),
 )
 
+// Matches the bash tool's capture ceiling and maximum timeout; a typed command has no per-call timeout.
+const SHELL_TIMEOUT = Duration.minutes(10)
+const SHELL_MAX_OUTPUT_BYTES = 1024 * 1024
+
+const runShell = (appProcess: AppProcess.Interface, shell: string, command: string, cwd: string) =>
+  appProcess
+    .run(
+      ChildProcess.make(shell, Shell.args(shell, command, cwd), {
+        cwd,
+        extendEnv: true,
+        env: { TERM: "dumb" },
+        stdin: "ignore",
+        detached: process.platform !== "win32",
+        forceKillAfter: Duration.seconds(3),
+      }),
+      { combineOutput: true, timeout: SHELL_TIMEOUT, maxOutputBytes: SHELL_MAX_OUTPUT_BYTES },
+    )
+    .pipe(
+      Effect.map((result) => {
+        const output = result.output?.toString("utf8") ?? ""
+        if (!result.outputTruncated) return output
+        return `${output}\n\n[output capture truncated at the in-memory safety limit]`
+      }),
+      // Spawn failures and timeouts become the recorded output so the shell message always completes.
+      Effect.catchTag("AppProcessError", (error) =>
+        Effect.succeed(
+          error.cause instanceof Error && error.cause.message === "Timed out"
+            ? `Command exceeded timeout of ${Duration.toMillis(SHELL_TIMEOUT)} ms.`
+            : error.message,
+        ),
+      ),
+    )
+
 const resolvePrompt = (input: PromptInput.Prompt) =>
   Prompt.make({
     text: input.text,
@@ -584,5 +663,6 @@ export const node = makeGlobalNode({
     LocationServiceMap.node,
     SessionProjector.node,
     llmClient,
+    AppProcess.node,
   ],
 })

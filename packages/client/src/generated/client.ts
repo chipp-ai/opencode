@@ -27,6 +27,8 @@ import type {
   SessionsWithdrawInputOutput,
   SessionsCompactInput,
   SessionsCompactOutput,
+  SessionsShellInput,
+  SessionsShellOutput,
   SessionsWaitInput,
   SessionsWaitOutput,
   SessionsStageInput,
@@ -445,6 +447,18 @@ export function make(options: ClientOptions) {
             path: `/api/session/${encodeURIComponent(input.sessionID)}/compact`,
             successStatus: 204,
             declaredStatuses: [404, 503, 400, 401],
+            empty: true,
+          },
+          requestOptions,
+        ),
+      shell: (input: SessionsShellInput, requestOptions?: RequestOptions) =>
+        request<SessionsShellOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/shell`,
+            body: { id: input["id"], command: input["command"], resume: input["resume"] },
+            successStatus: 204,
+            declaredStatuses: [409, 404, 400, 401],
             empty: true,
           },
           requestOptions,

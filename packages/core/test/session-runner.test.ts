@@ -1,4 +1,7 @@
-import { describe, expect } from "bun:test"
+import { afterAll, describe, expect } from "bun:test"
+import { mkdtempSync, realpathSync, rmSync } from "fs"
+import { tmpdir } from "os"
+import path from "path"
 import {
   LLMClient,
   LLMError,
@@ -59,6 +62,10 @@ import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Schema
 import { LocationServiceMap, type LocationError, type LocationServices } from "@opencode-ai/core/location-services"
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
+
+// A real directory so shell-mode tests can spawn processes in the Session's Location.
+const projectDirectory = AbsolutePath.make(realpathSync(mkdtempSync(path.join(tmpdir(), "opencode-session-runner-"))))
+afterAll(() => rmSync(projectDirectory, { recursive: true, force: true }))
 
 const requests: LLMRequest[] = []
 let response: LLMEvent[] = []
@@ -244,7 +251,7 @@ const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
   [LayerNodePlatform.llmClient, client],
   [SessionRunnerModel.node, models],
   [SystemContextRegistry.node, systemContext],
-  [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
+  [Location.node, Location.boundNode({ directory: projectDirectory })],
   [SkillGuidance.node, skillGuidance],
   [ReferenceGuidance.node, referenceGuidance],
   [PermissionV2.node, permission],
@@ -294,7 +301,7 @@ const it = testEffect(
       [PermissionV2.node, permission],
       [SessionRunnerModel.node, models],
       [SystemContextRegistry.node, systemContext],
-      [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
+      [Location.node, Location.boundNode({ directory: projectDirectory })],
       [SkillGuidance.node, skillGuidance],
       [ReferenceGuidance.node, referenceGuidance],
       [Snapshot.node, Snapshot.noopLayer],
@@ -316,7 +323,7 @@ const insertSession = (id: SessionV2.ID) =>
         id,
         project_id: Project.ID.global,
         slug: id,
-        directory: "/project",
+        directory: projectDirectory,
         title: "test",
         version: "test",
       })
@@ -347,7 +354,7 @@ const setup = Effect.gen(function* () {
   maxActiveToolExecutions = 0
   yield* db
     .insert(ProjectTable)
-    .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+    .values({ id: Project.ID.global, worktree: projectDirectory, sandboxes: [] })
     .onConflictDoNothing()
     .run()
     .pipe(Effect.orDie)
@@ -1269,6 +1276,104 @@ describe("SessionRunnerLLM", () => {
       expect(userTexts(requests[1]).join("\n")).toContain("<summary>\n## Objective\n- Manual summary\n</summary>")
       expect(userTexts(requests[1]).join("\n")).toContain("Pending question")
       expect(yield* SessionInput.listPending((yield* Database.Service).db, sessionID)).toEqual([])
+    }),
+  )
+
+  it.live("records a user shell command as a native shell message without calling the model", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      requests.length = 0
+
+      yield* session.shell({ sessionID, command: "pwd && echo shell-mode-ok && echo to-stderr 1>&2" })
+      yield* session.wait(sessionID)
+
+      expect(requests).toHaveLength(0)
+      expect(yield* session.active).not.toContain(sessionID)
+      const context = yield* session.context(sessionID)
+      expect(context).toHaveLength(1)
+      const shell = context[0]
+      if (shell?.type !== "shell") throw new Error("expected a shell message")
+      expect(shell.command).toBe("pwd && echo shell-mode-ok && echo to-stderr 1>&2")
+      expect(shell.output).toContain(projectDirectory)
+      expect(shell.output).toContain("shell-mode-ok")
+      expect(shell.output).toContain("to-stderr")
+      expect(shell.time.completed).toBeDefined()
+
+      const { db } = yield* Database.Service
+      const recorded = yield* db
+        .select({ type: EventTable.type })
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, sessionID))
+        .orderBy(asc(EventTable.seq))
+        .all()
+        .pipe(Effect.orDie)
+      expect(recorded.map((event) => event.type)).toEqual([
+        EventV2.versionedType(SessionEvent.Shell.Started.type, 1),
+        EventV2.versionedType(SessionEvent.Shell.Ended.type, 1),
+      ])
+    }),
+  )
+
+  it.live("records failing shell commands and does not continue unless resume is true", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      requests.length = 0
+
+      yield* session.shell({ sessionID, command: "echo before-failure; exit 7", resume: false })
+      yield* session.wait(sessionID)
+
+      expect(requests).toHaveLength(0)
+      const context = yield* session.context(sessionID)
+      expect(context).toMatchObject([{ type: "shell", command: "echo before-failure; exit 7" }])
+      expect(context[0]?.type === "shell" && context[0].output).toContain("before-failure")
+    }),
+  )
+
+  it.live("lets the model answer the shell output when resume is true", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      requests.length = 0
+      response = fragmentFixture("text", "text-shell", ["I see the output"]).completeEvents
+
+      yield* session.shell({ sessionID, command: "echo resumed-output", resume: true })
+      yield* session.wait(sessionID)
+
+      expect(requests).toHaveLength(1)
+      expect(userTexts(requests[0]).join("\n")).toContain("Shell command: echo resumed-output\n\nresumed-output")
+      expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual(["shell", "assistant"])
+    }),
+  )
+
+  it.live("rejects a shell command while the Session is running", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      streamGate = yield* Deferred.make<void>()
+      streamStarted = yield* Deferred.make<void>()
+      response = fragmentFixture("text", "text-busy", ["Busy answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Keep busy" }) })
+      yield* Deferred.await(streamStarted)
+
+      const error = yield* session.shell({ sessionID, command: "echo never" }).pipe(Effect.flip)
+      expect(error).toBeInstanceOf(SessionV2.BusyError)
+
+      yield* Deferred.succeed(streamGate, undefined)
+      yield* session.wait(sessionID)
+      expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual(["user", "assistant"])
+    }),
+  )
+
+  it.live("rejects a shell command for a missing Session", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const error = yield* session
+        .shell({ sessionID: SessionV2.ID.make("ses_missing_shell"), command: "echo never" })
+        .pipe(Effect.flip)
+      expect(error).toBeInstanceOf(SessionV2.NotFoundError)
     }),
   )
 
