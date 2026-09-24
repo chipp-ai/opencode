@@ -6,6 +6,7 @@ import type {
   PermissionRequest,
   PermissionV2Request,
   PromptInput,
+  Provider,
   QuestionRequest,
   QuestionV2Request,
   SessionMessage,
@@ -16,6 +17,8 @@ import type {
   UserMessage,
 } from "@opencode-ai/sdk/v2"
 import type { PromptInfo } from "../prompt/history"
+import { Locale } from "./locale"
+import { name } from "./model"
 
 /** Session palette commands that depend on V1-only endpoints or V1 message data, with no V2 path in the TUI yet. */
 export const V2_UNAVAILABLE_COMMANDS = new Set([
@@ -124,6 +127,9 @@ export function toV1Question(request: QuestionV2Request): QuestionRequest {
  * Project a V2 transcript into the V1 message/part shapes the existing session renderers consume.
  * `messages` is newest-first, matching both `context/data.tsx` and the V2 messages endpoint. `agent`
  * and `model` seed the selection for user messages that precede any recorded switch or step.
+ * Switches have no V1 shape, so they are returned separately, keyed by the id of the entry they follow
+ * ("" before the first entry). Anchoring to the preceding entry keeps a marker in place when the
+ * continuation that follows it arrives.
  */
 export function toV1Transcript(input: {
   sessionID: string
@@ -137,22 +143,25 @@ export function toV1Transcript(input: {
     model: input.model,
     parentID: "",
   }
+  const switches: Record<string, V2Switch[]> = {}
+  // Id of the most recent projected entry, which the next switch marker renders after.
+  const anchor = { id: "" }
   const entries = input.messages.toReversed().flatMap((message): { info: Message; parts: Part[] }[] => {
-    if (message.type === "agent-switched") {
-      selection.agent = message.agent
-      return []
-    }
-    if (message.type === "model-switched") {
-      selection.model = message.model
+    if (message.type === "agent-switched" || message.type === "model-switched") {
+      if (message.type === "agent-switched") selection.agent = message.agent
+      if (message.type === "model-switched") selection.model = message.model
+      ;(switches[anchor.id] ??= []).push(message)
       return []
     }
     if (message.type === "assistant") {
       selection.agent = message.agent
       selection.model = message.model
+      anchor.id = message.id
       return [assistantEntry(input, message, selection.parentID)]
     }
     if (message.type === "user") {
       selection.parentID = message.id
+      anchor.id = message.id
       const base = { sessionID: input.sessionID, messageID: message.id }
       return [
         {
@@ -180,7 +189,8 @@ export function toV1Transcript(input: {
         },
       ]
     }
-    if (message.type === "compaction")
+    if (message.type === "compaction") {
+      anchor.id = message.id
       return [
         {
           info: userInfo(input.sessionID, message.id, message.time.created, selection),
@@ -195,13 +205,42 @@ export function toV1Transcript(input: {
           ],
         },
       ]
+    }
     // System context, synthetic reminders, and shell turns have no V1 transcript representation.
     return []
   })
   return {
     messages: entries.map((entry) => entry.info),
     parts: Object.fromEntries(entries.map((entry) => [entry.info.id, entry.parts])),
+    switches,
   }
+}
+
+export type V2Switch = Extract<SessionMessage, { type: "model-switched" | "agent-switched" }>
+
+/** Transcript and toast text for a durable agent/model switch, using the provider catalog's display name. */
+export function switchLabel(item: V2Switch, providers: Provider[] | ReadonlyMap<string, Provider> | undefined) {
+  if (item.type === "agent-switched") return `Switched to ${Locale.titlecase(item.agent)} agent`
+  return `Switched to ${name(providers, item.model.providerID, item.model.id)}`
+}
+
+type SwitchObservation = { sessionID: string; id?: string; created?: number }
+
+/**
+ * Whether the newest switch just happened, rather than being history the TUI loaded. `previous` is
+ * undefined while V2 history is still loading; a switch first seen then only counts as live if it was
+ * created after the TUI opened the Session (`openedAt`), because a fallback on a new Session's first
+ * turn can land before its history finishes loading. Afterwards, any new switch id is live.
+ */
+export function liveSwitch(
+  previous: SwitchObservation | undefined,
+  current: SwitchObservation | undefined,
+  openedAt: number,
+) {
+  if (current?.id === undefined) return false
+  if (previous === undefined || previous.sessionID !== current.sessionID)
+    return current.created !== undefined && current.created >= openedAt
+  return previous.id !== current.id
 }
 
 function userInfo(
