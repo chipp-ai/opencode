@@ -4,7 +4,7 @@ import { HttpApi, HttpApiBuilder, HttpApiGroup } from "effect/unstable/httpapi"
 import type { HttpApiApp } from "./server"
 
 // Composition-time extension point: an embedder passes extensions to
-// `HttpApiApp.createRoutes(cors, extensions)` or `Server.listen({ routeExtensions })`.
+// `HttpApiApp.createRoutes(cors, { routeExtensions })` or `Server.listen({ routeExtensions })`.
 // Each extension is a standalone `HttpApi` (like `PtyConnectApi`), so it owns its
 // middleware stack instead of inheriting `RootHttpApi`'s `Authorization`.
 export type RouteExtension = Layer.Layer<never, EffectConfig.ConfigError, HttpApiApp.RouteExtensionServices>

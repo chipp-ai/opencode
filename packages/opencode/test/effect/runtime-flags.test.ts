@@ -18,6 +18,18 @@ describe("RuntimeFlags", () => {
     }),
   )
 
+  it.effect("event redaction is opt-in and not enabled by OPENCODE_EXPERIMENTAL", () =>
+    Effect.gen(function* () {
+      expect((yield* readFlags.pipe(Effect.provide(fromConfig({})))).eventRedact).toBe(false)
+      expect((yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true" })))).eventRedact).toBe(
+        false,
+      )
+      expect(
+        (yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EVENT_REDACT_ENABLED: "true" })))).eventRedact,
+      ).toBe(true)
+    }),
+  )
+
   it.effect("layer parses plugin flags from the active ConfigProvider", () =>
     Effect.gen(function* () {
       const flags = yield* readFlags.pipe(

@@ -174,10 +174,22 @@ export interface LayerOptions {
   readonly persist?: (data: Record<string, unknown>) => Record<string, unknown>
 }
 
+/**
+ * Composition-root default for `LayerOptions.persist`, read when the layer is built and used only when no
+ * explicit `persist` option is given. `node` is a bound global node reached from several independent
+ * `LayerNode.compile` passes (plus module-level Location service maps), and layers are memoized by identity,
+ * so swapping its Layer through a node replacement in one pass builds a second, disconnected EventV2. Providing
+ * this Reference above the whole composition instead reaches every pass while keeping the single shared instance.
+ */
+export const Persist = Context.Reference<LayerOptions["persist"]>("@opencode/EventV2/Persist", {
+  defaultValue: () => undefined,
+})
+
 export const layerWith = (options?: LayerOptions) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
+      const persist = options?.persist ?? (yield* Persist)
       const pubsub = {
         all: yield* PubSub.unbounded<Payload>(),
         durable: new Map<string, Set<PubSub.PubSub<void>>>(),
@@ -255,7 +267,7 @@ export const layerWith = (options?: LayerOptions) =>
                             .pipe(Effect.orDie)
                           const latest = row?.seq ?? -1
                           const raw = Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>
-                          const encoded = options?.persist ? options.persist(raw) : raw
+                          const encoded = persist ? persist(raw) : raw
                           if (input?.strictOwner && row?.ownerID && row.ownerID !== input.ownerID) {
                             yield* Effect.die(
                               new InvalidDurableEventError({

@@ -22,7 +22,7 @@ const original = {
 
 function app(extensions: ReadonlyArray<RouteExtension.RouteExtension>) {
   const handler = HttpRouter.toWebHandler(
-    HttpApiApp.createRoutes(undefined, extensions).pipe(
+    HttpApiApp.createRoutes(undefined, { routeExtensions: extensions }).pipe(
       Layer.provide(
         ConfigProvider.layer(
           ConfigProvider.fromUnknown({
