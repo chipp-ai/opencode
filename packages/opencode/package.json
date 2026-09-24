@@ -26,6 +26,11 @@
       "bun": "./src/storage/db.bun.ts",
       "node": "./src/storage/db.node.ts",
       "default": "./src/storage/db.bun.ts"
+    },
+    "#http-transport": {
+      "bun": "./src/server/http-transport.bun.ts",
+      "node": "./src/server/http-transport.node.ts",
+      "default": "./src/server/http-transport.bun.ts"
     }
   },
   "devDependencies": {
