@@ -85,6 +85,7 @@ test("Core reuses the canonical shared schemas", async () => {
     [coreCommand.Info, Command.Info],
     [coreConnection.CredentialInfo, Connection.CredentialInfo],
     [coreConnection.EnvInfo, Connection.EnvInfo],
+    [coreConnection.LegacyInfo, Connection.LegacyInfo],
     [coreConnection.Info, Connection.Info],
     [coreCredential.ID, Credential.ID],
     [coreCredential.OAuth, Credential.OAuth],

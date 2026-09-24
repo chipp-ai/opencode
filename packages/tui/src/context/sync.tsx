@@ -457,7 +457,8 @@ export const {
       const sessionListPromise = projectPromise.then(() => listSessions())
 
       // blocking - include session.list when continuing a session
-      const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
+      // `runner: "v2"` limits the model picker to models V2 sessions can run; servers with V2 off ignore it.
+      const providersPromise = sdk.client.config.providers({ workspace, runner: "v2" }, { throwOnError: true })
       const providerListPromise = sdk.client.provider.list({ workspace }, { throwOnError: true })
       const capabilitiesPromise = sdk.client.experimental.capabilities
         .get({ workspace }, { throwOnError: true })

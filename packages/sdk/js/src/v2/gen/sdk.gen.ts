@@ -1516,6 +1516,7 @@ export class Config2 extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
+      runner?: "v2"
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -1526,6 +1527,7 @@ export class Config2 extends HeyApiClient {
           args: [
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "query", key: "runner" },
           ],
         },
       ],

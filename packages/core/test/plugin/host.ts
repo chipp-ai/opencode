@@ -147,7 +147,11 @@ export function integrationHost(integration: Integration.Interface): PluginConte
       active: (id) => integration.connection.active(Integration.ID.make(id)),
       resolve: (connection) =>
         integration.connection.resolve(
-          connection.type === "credential" ? { ...connection, id: Credential.ID.make(connection.id) } : connection,
+          connection.type === "credential"
+            ? { ...connection, id: Credential.ID.make(connection.id) }
+            : connection.type === "legacy"
+              ? { ...connection, integrationID: Integration.ID.make(connection.integrationID) }
+              : connection,
         ),
     },
     transform: (callback) =>

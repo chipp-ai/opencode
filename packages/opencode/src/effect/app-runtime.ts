@@ -51,6 +51,7 @@ import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { BackgroundJob } from "@/background/job"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventPersist } from "@/effect/event-persist"
+import { LegacyCredential } from "@/effect/legacy-credential"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppNodeBuilderV1 } from "./app-node-builder-v1"
@@ -111,6 +112,7 @@ export const AppLayer = AppNodeBuilderV1.build(
   Layer.provideMerge(AppNodeBuilderV1.build(Ripgrep.node)),
   // Shares `memoMap` with `Server.Default()`, so whichever builds EventV2 first must see the same policy.
   Layer.provide(EventPersist.layer()),
+  Layer.provide(LegacyCredential.layer),
   Layer.provideMerge(Observability.layer),
 )
 

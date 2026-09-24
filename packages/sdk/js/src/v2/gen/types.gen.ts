@@ -5304,7 +5304,12 @@ export type ConnectionEnvInfo = {
   name: string
 }
 
-export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
+export type ConnectionLegacyInfo = {
+  type: "legacy"
+  integrationID: string
+}
+
+export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo | ConnectionLegacyInfo
 
 export type IntegrationInfo = {
   id: string
@@ -7919,6 +7924,7 @@ export type ConfigProvidersData = {
   query?: {
     directory?: string
     workspace?: string
+    runner?: "v2"
   }
   url: "/config/providers"
 }

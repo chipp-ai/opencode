@@ -1,5 +1,5 @@
-import { describe, expect } from "bun:test"
-import { Duration, Effect, Exit, Fiber, Scope, Stream } from "effect"
+import { describe, expect, test } from "bun:test"
+import { Duration, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import { Credential } from "@opencode-ai/core/credential"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -346,4 +346,53 @@ describe("Integration", () => {
         }),
     )
   })
+
+  // Plain `test`: `Credential.Legacy` is read when Integration's layer is built, and this file's `it` harness has
+  // already memoized that layer without it.
+  test("exposes V1-saved keys as the lowest-precedence connection", async () => {
+    const integrationID = Integration.ID.make("openrouter")
+    const legacyKeys: Record<string, Credential.Key> = {
+      openrouter: Credential.Key.make({ type: "key", key: "v1-secret", metadata: { region: "eu" } }),
+    }
+    const program = Effect.gen(function* () {
+      const integrations = yield* Integration.Service
+      const credentials = yield* Credential.Service
+      yield* integrations.transform((editor) =>
+        editor.method.update({ integrationID, method: { type: "key", label: "API key" } }),
+      )
+
+      const legacy = { type: "legacy" as const, integrationID }
+      expect(yield* integrations.connection.active(integrationID)).toEqual(legacy)
+      expect(yield* integrations.connection.resolve(legacy)).toEqual(legacyKeys.openrouter)
+      expect((yield* integrations.list()).find((item) => item.id === integrationID)?.connections).toEqual([legacy])
+
+      yield* credentials.create({ integrationID, value: Credential.Key.make({ type: "key", key: "v2-secret" }) })
+      expect((yield* integrations.connection.active(integrationID))?.type).toBe("credential")
+      expect((yield* integrations.get(integrationID))?.connections.map((item) => item.type)).toEqual([
+        "credential",
+        "legacy",
+      ])
+    })
+    await Effect.runPromise(
+      program.pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.fresh(AppNodeBuilder.build(LayerNode.group([Integration.node, Credential.node, EventV2.node]))).pipe(
+            Layer.provide(Layer.succeed(Credential.Legacy, () => Effect.succeed(legacyKeys))),
+          ),
+        ),
+      ),
+    )
+  })
+
+  it.effect("has no V1 connections when the host supplies no legacy source", () =>
+    Effect.gen(function* () {
+      const integrations = yield* Integration.Service
+      const integrationID = Integration.ID.make("openrouter")
+      yield* integrations.transform((editor) =>
+        editor.method.update({ integrationID, method: { type: "key", label: "API key" } }),
+      )
+      expect(yield* integrations.connection.active(integrationID)).toBeUndefined()
+    }),
+  )
 })

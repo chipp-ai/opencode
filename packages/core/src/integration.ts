@@ -222,6 +222,7 @@ export const locationLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const credentials = yield* Credential.Service
+    const legacy = yield* Credential.Legacy
     const events = yield* EventV2.Service
     const scope = yield* Scope.Scope
     const attempts = SynchronizedRef.makeUnsafe(new Map<AttemptID, AttemptEntry>())
@@ -285,7 +286,12 @@ export const locationLayer = Layer.effect(
       finalize: () => events.publish(Event.Updated, {}).pipe(Effect.asVoid),
     })
 
-    const resolveConnections = (entry: Entry | undefined, saved: readonly Credential.Info[]) => {
+    // Precedence: V2 credentials, then environment variables, then keys the V1 auth store saved.
+    const resolveConnections = (
+      entry: Entry | undefined,
+      saved: readonly Credential.Info[],
+      legacyKeys: Record<string, Credential.Key>,
+    ): IntegrationConnection.Info[] => {
       const credentials = saved
         .map((credential) => ({
           type: "credential" as const,
@@ -297,7 +303,8 @@ export const locationLayer = Layer.effect(
         .filter((method) => method.type === "env")
         .flatMap((method) => method.names.filter((name) => process.env[name]))
         .map((name) => ({ type: "env" as const, name }))
-      return [...credentials, ...env]
+      const v1 = entry && legacyKeys[entry.ref.id] ? [{ type: "legacy" as const, integrationID: entry.ref.id }] : []
+      return [...credentials, ...env, ...v1]
     }
 
     const project = (entry: Entry, connections: IntegrationConnection.Info[]) =>
@@ -369,24 +376,26 @@ export const locationLayer = Layer.effect(
       get: Effect.fn("Integration.get")(function* (id) {
         const entry = state.get().integrations.get(id)
         if (!entry) return undefined
-        return project(entry, resolveConnections(entry, yield* credentials.list(id)))
+        return project(entry, resolveConnections(entry, yield* credentials.list(id), yield* legacy()))
       }),
       list: Effect.fn("Integration.list")(function* () {
         const saved = Map.groupBy(yield* credentials.all(), (credential) => credential.integrationID)
+        const legacyKeys = yield* legacy()
         return Array.from(state.get().integrations.values(), (entry) =>
-          project(entry, resolveConnections(entry, saved.get(entry.ref.id) ?? [])),
+          project(entry, resolveConnections(entry, saved.get(entry.ref.id) ?? [], legacyKeys)),
         ).toSorted((a, b) => a.name.localeCompare(b.name))
       }),
       connection: {
         active: Effect.fn("Integration.connection.active")(function* (id) {
           const entry = state.get().integrations.get(id)
-          return resolveConnections(entry, yield* credentials.list(id))[0]
+          return resolveConnections(entry, yield* credentials.list(id), yield* legacy())[0]
         }),
         resolve: Effect.fn("Integration.connection.resolve")(function* (connection) {
           if (connection.type === "env") {
             const key = process.env[connection.name]
             return key ? Credential.Key.make({ type: "key", key }) : undefined
           }
+          if (connection.type === "legacy") return (yield* legacy())[connection.integrationID]
           const credential = yield* credentials.get(connection.id)
           if (!credential) return undefined
           if (credential.value.type === "key") return credential.value

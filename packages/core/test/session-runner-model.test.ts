@@ -313,6 +313,38 @@ describe("SessionRunnerModel", () => {
     }),
   )
 
+  it.effect("maps catalog OpenRouter AI SDK models into the native OpenRouter route", () =>
+    Effect.gen(function* () {
+      const resolved = yield* SessionRunnerModel.fromCatalogModel(
+        ModelV2.Info.make({
+          ...model({ type: "aisdk", package: "@openrouter/ai-sdk-provider", url: "https://openrouter.example/api/v1" }),
+          api: {
+            // Real models.dev OpenRouter IDs include `~`-prefixed aliases; they are passed through untouched.
+            id: ModelV2.ID.make("~z-ai/glm-flash-latest"),
+            type: "aisdk",
+            package: "@openrouter/ai-sdk-provider",
+            url: "https://openrouter.example/api/v1",
+          },
+          request: { headers: { "HTTP-Referer": "https://opencode.ai/" }, body: {} },
+        }),
+        Credential.Key.make({ type: "key", key: "or-secret" }),
+      )
+      const request = LLM.request({ model: resolved, prompt: "Hello" })
+      const prepared = yield* LLMClient.prepare(request)
+      const headers = yield* resolved.route.auth.apply({
+        request,
+        method: "POST",
+        url: "https://openrouter.example/api/v1/chat/completions",
+        body: "{}",
+        headers: Headers.empty,
+      })
+
+      expect(resolved.route).toMatchObject({ id: "openrouter", endpoint: { baseURL: "https://openrouter.example/api/v1" } })
+      expect(prepared.body).toMatchObject({ model: "~z-ai/glm-flash-latest", stream: true })
+      expect(headers.authorization).toBe("Bearer or-secret")
+    }),
+  )
+
   it.effect("rejects catalog APIs without a native route", () =>
     Effect.gen(function* () {
       const failure = yield* SessionRunnerModel.fromCatalogModel(
@@ -336,6 +368,7 @@ describe("SessionRunnerModel", () => {
           model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
         ),
       ).toBe(true)
+      expect(SessionRunnerModel.supported(model({ type: "aisdk", package: "@openrouter/ai-sdk-provider" }))).toBe(true)
       expect(
         SessionRunnerModel.supported(
           model({ type: "aisdk", package: "@ai-sdk/google", url: "https://google.example/v1" }),

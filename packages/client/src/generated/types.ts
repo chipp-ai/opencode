@@ -3076,6 +3076,7 @@ export type IntegrationsListOutput = {
     readonly connections: ReadonlyArray<
       | { readonly type: "credential"; readonly id: string; readonly label: string }
       | { readonly type: "env"; readonly name: string }
+      | { readonly type: "legacy"; readonly integrationID: string }
     >
   }>
 }
@@ -3128,6 +3129,7 @@ export type IntegrationsGetOutput = {
     readonly connections: ReadonlyArray<
       | { readonly type: "credential"; readonly id: string; readonly label: string }
       | { readonly type: "env"; readonly name: string }
+      | { readonly type: "legacy"; readonly integrationID: string }
     >
   } | null
 }

@@ -48,6 +48,15 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Credential") {}
 
+/**
+ * Composition-root source of API keys saved by the V1 provider auth store (`auth.json`), keyed by integration ID.
+ * Called on every lookup rather than copied into the credential table, so the V1 connect/disconnect flow stays the
+ * single source of truth for those keys. Core cannot depend on the V1 store, so hosts that have one provide this.
+ */
+export const Legacy = Context.Reference<() => Effect.Effect<Record<string, Key>>>("@opencode/v2/Credential/Legacy", {
+  defaultValue: () => () => Effect.succeed({}),
+})
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {

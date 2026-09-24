@@ -5,6 +5,7 @@ import { type Model } from "@opencode-ai/llm"
 import * as AnthropicMessages from "@opencode-ai/llm/protocols/anthropic-messages"
 import * as OpenAICompatibleChat from "@opencode-ai/llm/protocols/openai-compatible-chat"
 import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
+import { OpenRouter } from "@opencode-ai/llm/providers"
 import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
 import { Context, Effect, Layer, Schema } from "effect"
 import { produce } from "immer"
@@ -139,44 +140,38 @@ export const fromCatalogModel = (
           Object.assign(draft.request.body, credential.metadata)
         })
   const key = apiKey(resolved, credential)
-  if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai") {
-    return Effect.succeed(
-      withDefaults(resolved, OpenAIResponses.route)
-        .with({ auth: key === undefined ? Auth.none : Auth.bearer(key) })
-        .model({ id: resolved.api.id }),
+  const native = nativeRoute(resolved)
+  if (!native)
+    return Effect.fail(
+      new UnsupportedApiError({
+        providerID: resolved.providerID,
+        modelID: resolved.id,
+        api: apiName(resolved),
+      }),
     )
-  }
-  if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/anthropic") {
-    return Effect.succeed(
-      withDefaults(resolved, AnthropicMessages.route)
-        .with({ auth: key === undefined ? Auth.none : Auth.header("x-api-key", key) })
-        .model({ id: resolved.api.id }),
-    )
-  }
-  if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai-compatible" && resolved.api.url) {
-    return Effect.succeed(
-      withDefaults(resolved, OpenAICompatibleChat.route)
-        .with({ auth: key === undefined ? Auth.none : Auth.bearer(key) })
-        .model({ id: resolved.api.id }),
-    )
-  }
-  return Effect.fail(
-    new UnsupportedApiError({
-      providerID: resolved.providerID,
-      modelID: resolved.id,
-      api: apiName(resolved),
-    }),
+  return Effect.succeed(
+    withDefaults(resolved, native.route)
+      .with({ auth: key === undefined ? Auth.none : native.auth(key) })
+      .model({ id: resolved.api.id }),
   )
+}
+
+/** The single allowlist of catalog APIs the native runner can call; `supported` and `fromCatalogModel` both derive from it. */
+const nativeRoute = (model: ModelV2.Info) => {
+  if (model.api.type !== "aisdk") return
+  if (model.api.package === "@ai-sdk/openai") return { route: OpenAIResponses.route, auth: Auth.bearer }
+  if (model.api.package === "@ai-sdk/anthropic")
+    return { route: AnthropicMessages.route, auth: Auth.header("x-api-key") }
+  if (model.api.package === "@ai-sdk/openai-compatible" && model.api.url)
+    return { route: OpenAICompatibleChat.route, auth: Auth.bearer }
+  // OpenRouter speaks OpenAI Chat; its dedicated route keeps OpenRouter-only body options (usage, reasoning, prompt_cache_key).
+  if (model.api.package === "@openrouter/ai-sdk-provider") return { route: OpenRouter.route, auth: Auth.bearer }
 }
 
 export const resolve = (session: SessionSchema.Info, model: ModelV2.Info, credential?: Credential.Value) =>
   withVariant(model, session.model?.variant).pipe(Effect.flatMap((model) => fromCatalogModel(model, credential)))
 
-export const supported = (model: ModelV2.Info) =>
-  model.api.type === "aisdk" &&
-  (model.api.package === "@ai-sdk/openai" ||
-    model.api.package === "@ai-sdk/anthropic" ||
-    (model.api.package === "@ai-sdk/openai-compatible" && model.api.url !== undefined))
+export const supported = (model: ModelV2.Info) => nativeRoute(model) !== undefined
 
 /** Resolves models from the catalog belonging to the current Location runtime. */
 export const locationLayer = Layer.effect(

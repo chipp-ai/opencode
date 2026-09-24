@@ -57,6 +57,9 @@ export interface Plugin<R = never> {
   readonly effect: (context: PluginContext) => Effect.Effect<void, never, R | Scope.Scope>
 }
 
+/** Registered once every built-in plugin has loaded and the resulting catalog and integration state is materialized. */
+export const BootedID = PluginV2.ID.make("core/booted")
+
 export function define<R>(plugin: Plugin<R>) {
   return plugin
 }
@@ -122,7 +125,13 @@ const layer = Layer.effectDiscard(
         yield* add(ConfigProviderDiscoveryPlugin.Plugin)
         yield* add(VariantPlugin.Plugin)
       }),
-    ).pipe(Effect.withSpan("PluginInternal.boot"), Effect.forkScoped({ startImmediately: true }))
+    ).pipe(
+      // Waiters on an individual built-in plugin resume before this batch's deferred reloads run, so readers that
+      // need the fully materialized boot state wait on this marker instead. `ensuring` keeps them from hanging.
+      Effect.ensuring(plugin.add(BootedID, () => Effect.void)),
+      Effect.withSpan("PluginInternal.boot"),
+      Effect.forkScoped({ startImmediately: true }),
+    )
   }),
 )
 

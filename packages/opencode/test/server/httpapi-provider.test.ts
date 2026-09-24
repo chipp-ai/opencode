@@ -379,6 +379,39 @@ describe("provider HttpApi", () => {
   )
 
   it.instance(
+    "lists only models the V2 session runner can resolve in the model picker providers",
+    Effect.gen(function* () {
+      const directory = (yield* TestInstance).directory
+      // Keys saved through the legacy connect flow live only in auth.json; V2 must still treat them as connected.
+      yield* setEnvScoped(
+        "OPENCODE_AUTH_CONTENT",
+        JSON.stringify({
+          openrouter: { type: "api", key: "or-test-key" },
+          anthropic: { type: "api", key: "anthropic-test-key" },
+          google: { type: "api", key: "google-test-key" },
+        }),
+      )
+      const headers = { "x-opencode-directory": directory }
+      const configBody = yield* (yield* request("/config/providers?runner=v2", { headers })).json
+      const models = (id: string) => {
+        const provider = providerByID(configBody, "providers", id)
+        return isRecord(provider) && isRecord(provider.models) ? Object.keys(provider.models) : []
+      }
+
+      // `@openrouter/ai-sdk-provider` has a native route and auth.json supplies its key.
+      expect(models("openrouter")).toContain("anthropic/claude-sonnet-4")
+      expect(models("anthropic").length).toBeGreaterThan(0)
+      // Connected, but `@ai-sdk/google` has no native route, so selecting it would fail with UnsupportedApiError.
+      expect(providerByID(configBody, "providers", "google")).toBeUndefined()
+      // Callers that don't ask for the V2 runner view (ACP, V1 sessions) keep the full V1 list.
+      const unfiltered = yield* (yield* request("/config/providers", { headers })).json
+      expect(providerByID(unfiltered, "providers", "google")).toBeDefined()
+    }),
+    projectOptions,
+    30000,
+  )
+
+  it.instance(
     "keeps provider.models hook input mutations out of provider state",
     Effect.gen(function* () {
       const directory = (yield* TestInstance).directory

@@ -51,6 +51,7 @@ import { Truncate } from "@/tool/truncate"
 import { Worktree } from "@/worktree"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventPersist } from "@/effect/event-persist"
+import { LegacyCredential } from "@/effect/legacy-credential"
 import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
@@ -348,6 +349,8 @@ export function createRoutes(
     // module-level Location service maps inside route handlers), so a per-pass replacement would build a second,
     // disconnected instance. A Reference provided beneath all of them reaches the single memoized build.
     Layer.provide(EventPersist.layer(options?.persist)),
+    // Same reasoning as EventPersist: a Reference beneath every pass lets V2 Integration read V1-saved keys.
+    Layer.provide(LegacyCredential.layer),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,
     // so Observability must come after every service graph. Otherwise eagerly forked
     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout
