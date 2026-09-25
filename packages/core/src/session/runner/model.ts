@@ -3,6 +3,8 @@ export * as SessionRunnerModel from "./model"
 import { makeLocationNode } from "../../effect/app-node"
 import { type Model } from "@opencode-ai/llm"
 import * as AnthropicMessages from "@opencode-ai/llm/protocols/anthropic-messages"
+import * as CohereChat from "@opencode-ai/llm/protocols/cohere-chat"
+import * as Gemini from "@opencode-ai/llm/protocols/gemini"
 import * as OpenAICompatibleChat from "@opencode-ai/llm/protocols/openai-compatible-chat"
 import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
 import { OpenRouter } from "@opencode-ai/llm/providers"
@@ -156,16 +158,71 @@ export const fromCatalogModel = (
   )
 }
 
-/** The single allowlist of catalog APIs the native runner can call; `supported` and `fromCatalogModel` both derive from it. */
+// OpenAI-chat-compatible catalog packages that route through the generic
+// OpenAICompatibleChat protocol. Each is documented by its vendor as a
+// genuine OpenAI Chat Completions-compatible endpoint (request/response
+// shape, streaming, and tool-calling) — see nativeRoute's doc comment for
+// packages deliberately left out of this list (Mistral, Perplexity) because
+// they were found NOT to satisfy that bar.
+const OPENAI_COMPATIBLE_PACKAGES = new Set([
+  "@ai-sdk/openai-compatible",
+  "@ai-sdk/groq",
+  "@ai-sdk/cerebras",
+  "@ai-sdk/deepinfra",
+  "@ai-sdk/togetherai",
+])
+
+/**
+ * The single allowlist of catalog APIs the native runner can call; `supported` and `fromCatalogModel` both derive from it.
+ *
+ * Deliberately NOT included (each investigated, not just deferred):
+ * - `@ai-sdk/mistral`: Mistral's own OpenAPI-generated client marks streamed
+ *   `tool_calls[].index` as optional, while the shared OpenAI Chat protocol
+ *   requires it — a real divergence that can hard-fail or corrupt multi-tool
+ *   turns, not a hypothetical one.
+ * - `@ai-sdk/perplexity`: its chat completions endpoint has no tool/function
+ *   calling support at all, which the native runner's agentic tool loop
+ *   requires.
+ * - `ai-gateway-provider` (Cloudflare AI Gateway): needs an accountId/gatewayId
+ *   pair to build its base URL that no V2 catalog transform resolves into
+ *   `model.api.url` today, and its real auth model needs a `cf-aig-authorization`
+ *   gateway secret plus, for non-Workers-AI upstreams, a second independent
+ *   upstream provider bearer token — two credentials `Credential.Value` cannot
+ *   represent for one model.
+ * - `@ai-sdk/azure`: the resource name lives in a separate `resourceName`
+ *   config field (never folded into `model.api.url`, unlike Cloudflare Workers
+ *   AI's catalog transform), its real routes require a mandatory `api-version`
+ *   query param this allowlist has no way to attach generically, and its OAuth
+ *   (Azure CLI) auth mode needs a dynamic per-request token refresh that
+ *   `Credential.Value` cannot express — the same class of exclusion as GitHub
+ *   Copilot's OAuth.
+ * - `@ai-sdk/amazon-bedrock`: needs AWS SigV4 signing with a 3-part credential
+ *   (access key, secret, optional session token) `Credential.Value` doesn't
+ *   represent today.
+ * - `github-copilot`: needs OAuth device-flow + refresh, which V2's
+ *   `Credential.Legacy` bridge deliberately excludes (refresh logic lives
+ *   only in V1).
+ * - `@ai-sdk/google-vertex` / `@ai-sdk/google-vertex-anthropic`: needs GCP
+ *   service-account/ADC auth, a third distinct credential shape.
+ * - Out of scope entirely for this pass (no existing `packages/llm` route,
+ *   not requested): GitLab, Watsonx, Venice, Salad Cloud, merge-gateway,
+ *   aihubmix, qvac, and any other catalog package not named above.
+ */
 const nativeRoute = (model: ModelV2.Info) => {
   if (model.api.type !== "aisdk") return
   if (model.api.package === "@ai-sdk/openai") return { route: OpenAIResponses.route, auth: Auth.bearer }
   if (model.api.package === "@ai-sdk/anthropic")
     return { route: AnthropicMessages.route, auth: Auth.header("x-api-key") }
-  if (model.api.package === "@ai-sdk/openai-compatible" && model.api.url)
+  if (OPENAI_COMPATIBLE_PACKAGES.has(model.api.package) && model.api.url)
     return { route: OpenAICompatibleChat.route, auth: Auth.bearer }
   // OpenRouter speaks OpenAI Chat; its dedicated route keeps OpenRouter-only body options (usage, reasoning, prompt_cache_key).
   if (model.api.package === "@openrouter/ai-sdk-provider") return { route: OpenRouter.route, auth: Auth.bearer }
+  if (model.api.package === "@ai-sdk/google") return { route: Gemini.route, auth: Auth.header("x-goog-api-key") }
+  // xAI's Grok models speak the OpenAI Responses API natively (the golden recorded
+  // test exercises `xai.model(...)`, which resolves to XAI's `responses` route).
+  if (model.api.package === "@ai-sdk/xai") return { route: OpenAIResponses.route, auth: Auth.bearer }
+  // Cohere's Chat v2 API is not OpenAI-shaped; see protocols/cohere-chat.ts.
+  if (model.api.package === "@ai-sdk/cohere") return { route: CohereChat.route, auth: Auth.bearer }
 }
 
 export const resolve = (session: SessionSchema.Info, model: ModelV2.Info, credential?: Credential.Value) =>

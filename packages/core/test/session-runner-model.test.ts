@@ -348,16 +348,16 @@ describe("SessionRunnerModel", () => {
   it.effect("rejects catalog APIs without a native route", () =>
     Effect.gen(function* () {
       const failure = yield* SessionRunnerModel.fromCatalogModel(
-        model({ type: "aisdk", package: "@ai-sdk/google", url: "https://google.example/v1" }),
+        model({ type: "aisdk", package: "@ai-sdk/mistral", url: "https://mistral.example/v1" }),
       ).pipe(Effect.flip)
 
       expect(failure).toMatchObject({
         _tag: "SessionRunnerModel.UnsupportedApiError",
         providerID: "test-provider",
         modelID: "test-model",
-        api: "aisdk:@ai-sdk/google",
+        api: "aisdk:@ai-sdk/mistral",
       })
-      expect(failure.message).toBe("Unsupported API for test-provider/test-model: aisdk:@ai-sdk/google")
+      expect(failure.message).toBe("Unsupported API for test-provider/test-model: aisdk:@ai-sdk/mistral")
     }),
   )
 
@@ -373,8 +373,103 @@ describe("SessionRunnerModel", () => {
         SessionRunnerModel.supported(
           model({ type: "aisdk", package: "@ai-sdk/google", url: "https://google.example/v1" }),
         ),
+      ).toBe(true)
+      expect(
+        SessionRunnerModel.supported(
+          model({ type: "aisdk", package: "@ai-sdk/mistral", url: "https://mistral.example/v1" }),
+        ),
       ).toBe(false)
       expect(SessionRunnerModel.supported(model({ type: "native", settings: {} }))).toBe(false)
     }),
   )
+
+  it.effect("maps catalog Google AI SDK models into native Gemini routes with x-goog-api-key auth", () =>
+    Effect.gen(function* () {
+      const resolved = yield* SessionRunnerModel.fromCatalogModel(
+        model({ type: "aisdk", package: "@ai-sdk/google", url: "https://google.example/v1beta" }),
+      )
+
+      expect(resolved.route).toMatchObject({ id: "gemini", endpoint: { baseURL: "https://google.example/v1beta" } })
+      const headers = yield* resolved.route.auth.apply({
+        request: LLM.request({ model: resolved, prompt: "Hello" }),
+        method: "POST",
+        url: "https://google.example/v1beta/models/test:streamGenerateContent",
+        body: "{}",
+        headers: Headers.empty,
+      })
+      expect(headers["x-goog-api-key"]).toBe("secret")
+    }),
+  )
+
+  it.effect("maps catalog xAI models into the OpenAI Responses route with bearer auth", () =>
+    Effect.gen(function* () {
+      const resolved = yield* SessionRunnerModel.fromCatalogModel(
+        model({ type: "aisdk", package: "@ai-sdk/xai", url: "https://xai.example/v1" }),
+      )
+
+      expect(resolved.route).toMatchObject({ id: "openai-responses", endpoint: { baseURL: "https://xai.example/v1" } })
+      const headers = yield* resolved.route.auth.apply({
+        request: LLM.request({ model: resolved, prompt: "Hello" }),
+        method: "POST",
+        url: "https://xai.example/v1/responses",
+        body: "{}",
+        headers: Headers.empty,
+      })
+      expect(headers.authorization).toBe("Bearer secret")
+    }),
+  )
+
+  it.effect("maps catalog Cohere models into the dedicated Cohere Chat route with bearer auth", () =>
+    Effect.gen(function* () {
+      const resolved = yield* SessionRunnerModel.fromCatalogModel(
+        model({ type: "aisdk", package: "@ai-sdk/cohere", url: "https://cohere.example" }),
+      )
+
+      expect(resolved.route).toMatchObject({ id: "cohere-chat", endpoint: { baseURL: "https://cohere.example" } })
+      const headers = yield* resolved.route.auth.apply({
+        request: LLM.request({ model: resolved, prompt: "Hello" }),
+        method: "POST",
+        url: "https://cohere.example/v2/chat",
+        body: "{}",
+        headers: Headers.empty,
+      })
+      expect(headers.authorization).toBe("Bearer secret")
+    }),
+  )
+
+  for (const packageName of ["@ai-sdk/groq", "@ai-sdk/cerebras", "@ai-sdk/deepinfra", "@ai-sdk/togetherai"] as const)
+    it.effect(`maps catalog ${packageName} models into the generic OpenAI-compatible Chat route`, () =>
+      Effect.gen(function* () {
+        const resolved = yield* SessionRunnerModel.fromCatalogModel(
+          model({ type: "aisdk", package: packageName, url: "https://compatible.example/v1" }),
+        )
+
+        expect(resolved.route).toMatchObject({
+          id: "openai-compatible-chat",
+          endpoint: { baseURL: "https://compatible.example/v1" },
+        })
+        const headers = yield* resolved.route.auth.apply({
+          request: LLM.request({ model: resolved, prompt: "Hello" }),
+          method: "POST",
+          url: "https://compatible.example/v1/chat/completions",
+          body: "{}",
+          headers: Headers.empty,
+        })
+        expect(headers.authorization).toBe("Bearer secret")
+      }),
+    )
+
+  // Deliberately not wired into `nativeRoute` — see its doc comment for why.
+  // These lock the skip decisions in as regressions: a future change that
+  // accidentally "fixes" one of these without addressing the underlying gap
+  // (documented on `nativeRoute`) should fail loudly here instead of silently
+  // shipping a half-correct integration.
+  for (const packageName of ["ai-gateway-provider", "@ai-sdk/azure", "@ai-sdk/mistral", "@ai-sdk/perplexity"] as const)
+    it.effect(`still rejects ${packageName} (deliberately out of scope)`, () =>
+      Effect.sync(() => {
+        expect(
+          SessionRunnerModel.supported(model({ type: "aisdk", package: packageName, url: "https://example.test/v1" })),
+        ).toBe(false)
+      }),
+    )
 })
