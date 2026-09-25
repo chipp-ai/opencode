@@ -1,5 +1,6 @@
 export * as ConfigMcpJson from "./mcp-json"
 
+import path from "path"
 import { type ParseError as JsoncParseError, parse as parseJsonc } from "jsonc-parser"
 import { Option, Schema } from "effect"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
@@ -36,8 +37,18 @@ const DEFAULT_VALUE_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}/
 const PLAIN_VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
 
 /** Discovers and translates a `.mcp.json` file at the given path. Never throws: parse/shape problems are
- * reported as diagnostics for the caller to log, and discovery simply contributes nothing. */
-export async function load(file: string): Promise<Result> {
+ * reported as diagnostics for the caller to log, and discovery simply contributes nothing.
+ *
+ * Security note: every field except `env` values is copied through as an opaque, literal string — `command`,
+ * `args`, `url`, `headers`, and `cwd` are never passed through any substitution or expansion. `.mcp.json` is a
+ * foreign, casually-trusted convention (pasted from READMEs, MCP marketplaces, etc.), not a file authored with
+ * opencode's own `{env:...}`/`{file:...}` templating in mind. Only `env` values are resolved, and only against
+ * `${VAR}` (a strict identifier, never a wildcard match on arbitrary text), directly against `envSource` /
+ * `process.env` — never through the general-purpose `ConfigVariable.substitute`, which also expands
+ * `{file:path}`. Doing so would let a malicious `.mcp.json` embed a literal `{file:~/.ssh/id_rsa}`-shaped token
+ * in `args`/`url`/`cwd`/a non-`${}` env value and have opencode read that file's contents into a value handed
+ * straight to a locally-spawned process the same file controls. */
+export async function load(file: string, envSource?: Record<string, string>): Promise<Result> {
   const text = await Filesystem.readText(file).catch(() => undefined)
   if (!text) return { servers: {}, diagnostics: [] }
 
@@ -50,6 +61,7 @@ export async function load(file: string): Promise<Result> {
 
   const servers: Record<string, ConfigMCPV1.Info> = {}
   const diagnostics: Diagnostic[] = []
+  const baseDir = path.dirname(file)
 
   for (const [name, raw] of Object.entries(data.mcpServers)) {
     const decoded = decodeServer(raw)
@@ -57,7 +69,7 @@ export async function load(file: string): Promise<Result> {
       diagnostics.push({ file, message: `skipping MCP server "${name}": does not match the expected .mcp.json shape` })
       continue
     }
-    const entry = translateServer(name, decoded.value, file, diagnostics)
+    const entry = translateServer(name, decoded.value, file, baseDir, envSource, diagnostics)
     if (entry) servers[name] = entry
   }
 
@@ -68,6 +80,8 @@ function translateServer(
   name: string,
   raw: RawServer,
   file: string,
+  baseDir: string,
+  envSource: Record<string, string> | undefined,
   diagnostics: Diagnostic[],
 ): ConfigMCPV1.Info | undefined {
   if (raw.type === "ws") {
@@ -87,6 +101,7 @@ function translateServer(
       diagnostics.push({ file, message: `skipping MCP server "${name}": remote server is missing "url"` })
       return undefined
     }
+    // url/headers are copied through opaque, unmodified -- see the module-level security note.
     return { type: "remote", url: raw.url, headers: raw.headers }
   }
 
@@ -95,18 +110,45 @@ function translateServer(
     return undefined
   }
 
+  const cwd = resolveCwd(name, raw.cwd, file, baseDir, diagnostics)
+  if (raw.cwd && !cwd) return undefined
+
   return {
     type: "local",
+    // command/args are copied through opaque, unmodified -- see the module-level security note.
     command: [raw.command, ...(raw.args ?? [])],
-    cwd: raw.cwd,
-    environment: translateEnvironment(name, raw.env, file, diagnostics),
+    cwd,
+    environment: translateEnvironment(name, raw.env, file, envSource, diagnostics),
   }
+}
+
+/** A `.mcp.json`-declared `cwd` must resolve inside the directory the file itself lives in. Local MCP servers
+ * are spawned relative to `InstanceState.directory` (the project root), and a `.mcp.json` was never meant to
+ * redirect that anywhere else on disk -- reject `..`-escapes and absolute paths outside the project rather than
+ * silently spawn a configured command in an arbitrary directory the file's author chose. */
+function resolveCwd(
+  name: string,
+  cwd: string | undefined,
+  file: string,
+  baseDir: string,
+  diagnostics: Diagnostic[],
+): string | undefined {
+  if (!cwd) return undefined
+  const resolved = path.resolve(baseDir, cwd)
+  const relative = path.relative(baseDir, resolved)
+  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return cwd
+  diagnostics.push({
+    file,
+    message: `skipping MCP server "${name}": "cwd" ("${cwd}") resolves outside the .mcp.json's own directory`,
+  })
+  return undefined
 }
 
 function translateEnvironment(
   serverName: string,
   env: Record<string, string> | undefined,
   file: string,
+  envSource: Record<string, string> | undefined,
   diagnostics: Diagnostic[],
 ) {
   if (!env) return undefined
@@ -114,14 +156,21 @@ function translateEnvironment(
     Object.entries(env)
       .map(([key, value]): [string, string | undefined] => [
         key,
-        translateEnvValue(serverName, key, value, file, diagnostics),
+        translateEnvValue(serverName, key, value, file, envSource, diagnostics),
       ])
       .filter((entry): entry is [string, string] => entry[1] !== undefined),
   )
   return Object.keys(translated).length ? translated : undefined
 }
 
-function translateEnvValue(serverName: string, key: string, value: string, file: string, diagnostics: Diagnostic[]) {
+function translateEnvValue(
+  serverName: string,
+  key: string,
+  value: string,
+  file: string,
+  envSource: Record<string, string> | undefined,
+  diagnostics: Diagnostic[],
+) {
   const withDefault = value.match(DEFAULT_VALUE_PATTERN)
   if (withDefault) {
     diagnostics.push({
@@ -130,5 +179,9 @@ function translateEnvValue(serverName: string, key: string, value: string, file:
     })
     return undefined
   }
-  return value.replace(PLAIN_VAR_PATTERN, (_, name) => `{env:${name}}`)
+  // Resolved directly against a real env lookup here -- never routed through the general-purpose
+  // ConfigVariable.substitute, which also expands `{file:path}` and would apply to this whole object were it
+  // used. Only a strict `${IDENTIFIER}` shape is ever substituted; every other character in the value, including
+  // any literal `{env:...}`/`{file:...}`-shaped text an author wrote here, passes through unmodified and inert.
+  return value.replace(PLAIN_VAR_PATTERN, (_, name) => (envSource?.[name] ?? process.env[name]) || "")
 }

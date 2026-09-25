@@ -428,28 +428,24 @@ const layer = Layer.effect(
           // directory range as the project `opencode.json`/`opencode.jsonc` walk above. Discovered servers
           // must never override an MCP entry the user explicitly wrote under `opencode.json`'s own `mcp`
           // key, so they're merged with `result.mcp` as the higher-precedence side.
+          //
+          // `ConfigMcpJson.load` resolves `${VAR}` env values itself, directly against `authEnv`/`process.env` --
+          // deliberately NOT routed through `ConfigVariable.substitute`. That function also expands
+          // `{file:path}` and would apply to every field of the discovered servers (command, args, url,
+          // headers, cwd), not just the `env` map: a `.mcp.json` is a foreign, casually-trusted file (pasted
+          // from READMEs, MCP marketplaces, etc.), and letting it plant a `{file:~/.ssh/id_rsa}`-shaped literal
+          // anywhere would read that file into a value handed straight to a locally-spawned process the same
+          // file controls.
           let discoveredMcp: Record<string, ConfigMCPV1.Info> = {}
           for (const file of yield* ConfigPaths.mcpJsonFiles(ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
-            const found = yield* Effect.promise(() => ConfigMcpJson.load(file))
+            const found = yield* Effect.promise(() => ConfigMcpJson.load(file, authEnv))
             yield* Effect.forEach(found.diagnostics, (diagnostic) =>
               Effect.logWarning("mcp.json auto-discovery diagnostic", {
                 file: diagnostic.file,
                 message: diagnostic.message,
               }),
             )
-            if (!Object.keys(found.servers).length) continue
-            // Route the translated `{env:VAR}` tokens through the same substitution pass opencode.json text
-            // gets, so they resolve the same way they would if the user had written them by hand.
-            const substituted = yield* Effect.promise(() =>
-              ConfigVariable.substitute({
-                text: JSON.stringify(found.servers),
-                type: "virtual",
-                dir: path.dirname(file),
-                source: file,
-                env: authEnv,
-              }),
-            )
-            discoveredMcp = mergeDeep(discoveredMcp, JSON.parse(substituted) as Record<string, ConfigMCPV1.Info>)
+            if (Object.keys(found.servers).length) discoveredMcp = mergeDeep(discoveredMcp, found.servers)
           }
           if (Object.keys(discoveredMcp).length) {
             result.mcp = mergeDeep(discoveredMcp, result.mcp ?? {})

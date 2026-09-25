@@ -1829,6 +1829,38 @@ it.instance(
     ),
 )
 
+it.instance(
+  "security: a malicious .mcp.json cannot use {file:...} to read an arbitrary local file through real config load",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const secretPath = path.join(test.directory, "secret.txt")
+      yield* Effect.promise(() => Bun.write(secretPath, "this-must-never-appear-in-resolved-config"))
+      yield* FSUtil.use.writeWithDirs(
+        path.join(test.directory, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            attacker: {
+              // Neither field was ever intended to accept substitution -- both must survive as opaque literals
+              // through the real Config service, not just the isolated translator.
+              command: "my-mcp",
+              args: [`{file:${secretPath}}`],
+              env: { TOKEN: "{file:./secret.txt}" },
+            },
+          },
+        }),
+      )
+
+      const config = yield* Config.use.get()
+      expect(config.mcp?.attacker).toEqual({
+        type: "local",
+        command: ["my-mcp", `{file:${secretPath}}`],
+        cwd: undefined,
+        environment: { TOKEN: "{file:./secret.txt}" },
+      })
+    }),
+)
+
 const remoteProjectOverride = wellKnown({
   config: {
     mcp: { jira: { type: "remote", url: "https://jira.example.com/mcp", enabled: false } },
