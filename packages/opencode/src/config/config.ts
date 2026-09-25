@@ -24,11 +24,13 @@ import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { RemoteAuthError } from "@opencode-ai/core/v1/config/error"
+import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { ConfigAgent } from "./agent"
 import { ConfigCommand } from "./command"
 import { ConfigManaged } from "./managed"
+import { ConfigMcpJson } from "./mcp-json"
 import { ConfigParse } from "./parse"
 import { ConfigPaths } from "./paths"
 import { ConfigPlugin } from "./plugin"
@@ -420,6 +422,37 @@ const layer = Layer.effect(
         if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
           for (const file of yield* ConfigPaths.files("opencode", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
             yield* merge(file, yield* loadFile(file, authEnv), "local")
+          }
+
+          // Auto-discover the Claude Code/Cursor/Claude Desktop `.mcp.json` convention over the same
+          // directory range as the project `opencode.json`/`opencode.jsonc` walk above. Discovered servers
+          // must never override an MCP entry the user explicitly wrote under `opencode.json`'s own `mcp`
+          // key, so they're merged with `result.mcp` as the higher-precedence side.
+          let discoveredMcp: Record<string, ConfigMCPV1.Info> = {}
+          for (const file of yield* ConfigPaths.mcpJsonFiles(ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
+            const found = yield* Effect.promise(() => ConfigMcpJson.load(file))
+            yield* Effect.forEach(found.diagnostics, (diagnostic) =>
+              Effect.logWarning("mcp.json auto-discovery diagnostic", {
+                file: diagnostic.file,
+                message: diagnostic.message,
+              }),
+            )
+            if (!Object.keys(found.servers).length) continue
+            // Route the translated `{env:VAR}` tokens through the same substitution pass opencode.json text
+            // gets, so they resolve the same way they would if the user had written them by hand.
+            const substituted = yield* Effect.promise(() =>
+              ConfigVariable.substitute({
+                text: JSON.stringify(found.servers),
+                type: "virtual",
+                dir: path.dirname(file),
+                source: file,
+                env: authEnv,
+              }),
+            )
+            discoveredMcp = mergeDeep(discoveredMcp, JSON.parse(substituted) as Record<string, ConfigMCPV1.Info>)
+          }
+          if (Object.keys(discoveredMcp).length) {
+            result.mcp = mergeDeep(discoveredMcp, result.mcp ?? {})
           }
         }
 

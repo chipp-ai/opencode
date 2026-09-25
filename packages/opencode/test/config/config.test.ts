@@ -1664,6 +1664,171 @@ it.instance("local .opencode config can override MCP from project config", () =>
   }),
 )
 
+// .mcp.json auto-discovery tests (Claude Code/Cursor/Claude Desktop convention)
+
+it.instance("does not add an mcp key when no .mcp.json is present anywhere (regression guard)", () =>
+  Effect.gen(function* () {
+    const config = yield* Config.use.get()
+    expect(config.mcp).toBeUndefined()
+  }),
+)
+
+it.instance("discovers a local (stdio) server from .mcp.json", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* FSUtil.use.writeWithDirs(
+      path.join(test.directory, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          filesystem: {
+            command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+          },
+        },
+      }),
+    )
+
+    const config = yield* Config.use.get()
+    expect(config.mcp?.filesystem).toMatchObject({
+      type: "local",
+      command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    })
+  }),
+)
+
+it.instance("discovers a remote (http) server from .mcp.json", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* FSUtil.use.writeWithDirs(
+      path.join(test.directory, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          docs: { type: "http", url: "https://docs.example.com/mcp" },
+        },
+      }),
+    )
+
+    const config = yield* Config.use.get()
+    expect(config.mcp?.docs).toMatchObject({
+      type: "remote",
+      url: "https://docs.example.com/mcp",
+    })
+  }),
+)
+
+it.instance("explicit opencode.jsonc mcp entry wins over a discovered .mcp.json entry with the same name", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* FSUtil.use.writeWithDirs(
+      path.join(test.directory, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          shared: { command: "auto-discovered-command" },
+        },
+      }),
+    )
+    yield* writeConfigEffect(
+      test.directory,
+      {
+        $schema: "https://opencode.ai/config.json",
+        mcp: {
+          shared: { type: "local", command: ["explicit-command"], enabled: false },
+        },
+      },
+      "opencode.jsonc",
+    )
+
+    const config = yield* Config.use.get()
+    expect(config.mcp?.shared).toEqual({
+      type: "local",
+      command: ["explicit-command"],
+      enabled: false,
+    })
+  }),
+)
+
+it.instance("${VAR} in a discovered .mcp.json env value is translated to {env:VAR} in resolved config", () =>
+  withProcessEnv(
+    "MCP_JSON_TEST_VAR",
+    "resolved-value",
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      yield* FSUtil.use.writeWithDirs(
+        path.join(test.directory, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            server: {
+              command: "my-mcp",
+              env: { API_KEY: "${MCP_JSON_TEST_VAR}" },
+            },
+          },
+        }),
+      )
+
+      const config = yield* Config.use.get()
+      expect(config.mcp?.server).toMatchObject({
+        type: "local",
+        environment: { API_KEY: "resolved-value" },
+      })
+    }),
+  ),
+)
+
+it.instance(
+  "live scenario: a mixed .mcp.json (stdio servers with ${VAR} and ${VAR:-default} env) resolves as expected",
+  () =>
+    withProcessEnv(
+      "MCP_JSON_LIVE_GITHUB_TOKEN",
+      "ghp_live_token",
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        yield* FSUtil.use.writeWithDirs(
+          path.join(test.directory, ".mcp.json"),
+          JSON.stringify({
+            mcpServers: {
+              github: {
+                command: "npx",
+                args: ["-y", "@modelcontextprotocol/server-github"],
+                env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${MCP_JSON_LIVE_GITHUB_TOKEN}" },
+              },
+              postgres: {
+                command: "npx",
+                args: ["-y", "@modelcontextprotocol/server-postgres"],
+                env: { PGPORT: "${PGPORT:-5432}" },
+              },
+              docs: {
+                type: "http",
+                url: "https://docs.example.com/mcp",
+              },
+            },
+          }),
+        )
+
+        const config = yield* Config.use.get()
+
+        expect(config.mcp?.github).toEqual({
+          type: "local",
+          command: ["npx", "-y", "@modelcontextprotocol/server-github"],
+          cwd: undefined,
+          environment: { GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_live_token" },
+        })
+        // ${PGPORT:-5432} has no opencode equivalent, so the key is dropped entirely rather than
+        // baking in an empty string or the wrong default.
+        expect(config.mcp?.postgres).toEqual({
+          type: "local",
+          command: ["npx", "-y", "@modelcontextprotocol/server-postgres"],
+          cwd: undefined,
+          environment: undefined,
+        })
+        expect(config.mcp?.docs).toEqual({
+          type: "remote",
+          url: "https://docs.example.com/mcp",
+          headers: undefined,
+        })
+      }),
+    ),
+)
+
 const remoteProjectOverride = wellKnown({
   config: {
     mcp: { jira: { type: "remote", url: "https://jira.example.com/mcp", enabled: false } },

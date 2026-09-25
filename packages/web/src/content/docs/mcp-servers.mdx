@@ -44,6 +44,37 @@ You can also disable a server by setting `enabled` to `false`. This is useful if
 
 ---
 
+### Auto-discovery from `.mcp.json`
+
+If your project has a `.mcp.json` file at its root — the convention used by Claude Code, Claude Desktop, and Cursor — OpenCode automatically discovers it and translates its `mcpServers` into MCP servers, so you don't have to hand-translate a config you already have.
+
+```json title=".mcp.json"
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "env": {
+        "MY_API_KEY": "${MY_API_KEY}"
+      }
+    },
+    "docs": {
+      "type": "http",
+      "url": "https://docs.example.com/mcp"
+    }
+  }
+}
+```
+
+A few notes on the translation:
+
+- `command`/`args`/`env`/`cwd` entries become `type: "local"` servers; `url`/`headers` entries (including `type: "http"`, `"streamable-http"`, and the deprecated `"sse"`) become `type: "remote"` servers.
+- `type: "ws"` (WebSocket) servers aren't supported by OpenCode's remote MCP client and are skipped, with a warning logged naming the server.
+- Bash-style `${VAR}` environment values are translated to OpenCode's own `{env:VAR}` syntax. The `${VAR:-default}` fallback form has no OpenCode equivalent — that environment key is dropped entirely (rather than baking in an empty string), with a warning logged naming the variable and the default that's being dropped. Export the variable directly if you rely on that default.
+- **Explicit `mcp` entries in `opencode.json`/`opencode.jsonc` always take precedence over anything auto-discovered from `.mcp.json`.** If a server name exists in both, your explicit config wins in full — auto-discovery never overrides a server you've configured by hand.
+
+---
+
 ### Overriding remote defaults
 
 Organizations can provide default MCP servers via their `.well-known/opencode` endpoint. These servers may be disabled by default, allowing users to opt-in to the ones they need.
