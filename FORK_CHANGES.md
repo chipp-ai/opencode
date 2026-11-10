@@ -382,6 +382,15 @@ Two independent automated security reviews of the commit above — run against t
 - **Verified:** `bun typecheck` clean. `test/config/mcp-json.test.ts`: 17 pass (7 new, covering opaque passthrough for both non-`env` fields and non-`${}` `env` values, `cwd` containment in both directions, and unset-variable-resolves-to-empty-string). `test/config/config.test.ts`: 114 pass (1 new: an end-to-end regression through the real `Config` service proving a malicious `.mcp.json`'s `{file:...}` tokens never resolve to real file contents in the final resolved config). Broader sweep (`test/config`, `test/mcp`, `test/plugin`, `test/agent`): 574 pass, 3 pre-existing skip, 0 fail across 41 files.
 - **Where:** [`dev` branch history](https://github.com/chipp-ai/opencode/commits/dev), commit `9a55bfcb60`.
 
+### Per-agent `instructions: false`
+
+Every agent of a process got the same instruction files: `session/prompt.ts` called `instruction.system()` with no agent, so a narrow read-only helper (the built-in `explore`, as Chipp's sandboxes configure it) paid for the global `AGENTS.md`, the project `AGENTS.md`/`CLAUDE.md` and the config's `instructions` on its first call. An agent's `options` could not switch that off, because they go to the model provider, and an unknown agent key falls into `options`.
+
+- **What changed:** an agent config entry may set `instructions: false`. That agent's system prompt then carries no instruction files, and its read tool attaches no nested `AGENTS.md`/`CLAUDE.md`. Unset means true, so existing agents are unchanged. `instructions` is a known agent key (`ConfigAgentV1` `KNOWN_KEYS`), so it no longer leaks into provider options.
+- **Verified:** `bun typecheck` clean in `core` and `opencode`. New tests: `test/agent/agent.test.ts` (the field is set and is not an option), `test/tool/read.test.ts` (no nested attach for the flagged agent, still attached for `build`), `test/session/prompt.test.ts` (the model request carries the project `AGENTS.md` by default and leaves it out with the flag). The read and prompt tests fail with the source change reverted.
+- **Also on the private sibling fork:** the same commit is `b3a54229c0` on its `chipp/persistent-runtime` branch, released there as `chipp-v1.18.29-p18`.
+- **Where:** [`dev` branch history](https://github.com/chipp-ai/opencode/commits/dev), commit `b829eb3616`.
+
 ---
 
 Also referenced from the [README](./README.md#fork-changes).
