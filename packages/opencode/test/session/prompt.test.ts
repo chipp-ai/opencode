@@ -581,6 +581,45 @@ withMcpInstructions.instance(
   15_000,
 )
 
+const instructionRequestBody = Effect.fn("test.instructionRequestBody")(function* (agent: { instructions?: boolean }) {
+  const { dir, llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), agent: { build: agent } }))
+  yield* writeText(path.join(dir, "AGENTS.md"), "Project rule: PROJECT-AGENTS-MARKER")
+  const prompt = yield* SessionPrompt.Service
+  const sessions = yield* Session.Service
+  const chat = yield* sessions.create({
+    title: "Pinned",
+    permission: [{ permission: "*", pattern: "*", action: "allow" }],
+  })
+  yield* llm.hang
+  yield* user(chat.id, "hello")
+
+  const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+  yield* awaitWithTimeout(llm.wait(1), "timed out waiting for the model request", "10 seconds")
+  const hits = yield* llm.hits
+  yield* Fiber.interrupt(fiber)
+  return JSON.stringify(hits[0]?.body)
+})
+
+it.instance(
+  "loop includes project instruction files in the system prompt by default",
+  () =>
+    Effect.gen(function* () {
+      expect(yield* instructionRequestBody({})).toContain("PROJECT-AGENTS-MARKER")
+    }),
+  15_000,
+)
+
+it.instance(
+  "loop leaves instruction files out for an agent with instructions: false",
+  () =>
+    Effect.gen(function* () {
+      const body = yield* instructionRequestBody({ instructions: false })
+      expect(body).not.toContain("PROJECT-AGENTS-MARKER")
+      expect(body).not.toContain("Instructions from:")
+    }),
+  15_000,
+)
+
 it.instance("legacy prompt emits message events without session.next events", () =>
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service

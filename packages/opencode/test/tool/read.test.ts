@@ -582,6 +582,24 @@ describe("tool.read loaded instructions", () => {
       expect(result.metadata.loaded).toContain(path.join(dir, "subdir", "AGENTS.md"))
     }),
   )
+
+  it.live("skips nested instruction files for an agent with instructions: false", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ config: { agent: { explore: { instructions: false } } } })
+      yield* put(path.join(dir, "subdir", "AGENTS.md"), "# Test Instructions\nDo something special.")
+      yield* put(path.join(dir, "subdir", "CLAUDE.md"), "# Claude Instructions")
+      yield* put(path.join(dir, "subdir", "nested", "test.txt"), "test content")
+      const file = path.join(dir, "subdir", "nested", "test.txt")
+
+      const explore = yield* exec(dir, { filePath: file }, { ...ctx, agent: "explore" })
+      expect(explore.output).toContain("test content")
+      expect(explore.output).not.toContain("Test Instructions")
+      expect(explore.metadata.loaded).toEqual([])
+
+      const build = yield* exec(dir, { filePath: file }, { ...ctx, agent: "build", messageID: MessageID.make("msg_b") })
+      expect(build.metadata.loaded).toContain(path.join(dir, "subdir", "AGENTS.md"))
+    }),
+  )
 })
 
 describe("tool.read binary detection", () => {

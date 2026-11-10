@@ -318,6 +318,25 @@ it.instance(
 )
 
 it.instance(
+  "agent instructions config is a field, not a provider option",
+  () =>
+    Effect.gen(function* () {
+      const explore = yield* load((svc) => svc.get("explore"))
+      const build = yield* load((svc) => svc.get("build"))
+      expect(explore?.instructions).toBe(false)
+      expect(explore?.options).not.toHaveProperty("instructions")
+      expect(build?.instructions).toBeUndefined()
+    }),
+  {
+    config: {
+      agent: {
+        explore: { instructions: false },
+      },
+    },
+  },
+)
+
+it.instance(
   "agent mode can be overridden",
   () =>
     Effect.gen(function* () {
