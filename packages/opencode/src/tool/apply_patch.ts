@@ -139,14 +139,15 @@ export const ApplyPatchTool = Tool.define(
               if (change.removed) deletions += change.count || 0
             }
 
-            const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
+            const destination = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
+            const movePath = destination !== filePath ? destination : undefined
             yield* assertExternalDirectoryEffect(ctx, movePath)
 
             fileChanges.push({
               filePath,
               oldContent,
               newContent,
-              type: hunk.move_path ? "move" : "update",
+              type: movePath ? "move" : "update",
               movePath,
               diff,
               additions,

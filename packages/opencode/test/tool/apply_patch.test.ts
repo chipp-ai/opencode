@@ -176,6 +176,29 @@ describe("tool.apply_patch freeform", () => {
   )
 
   it.instance(
+    "preserves a file when a patch moves it onto itself",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const target = path.join(test.directory, "same.txt")
+        for (const destination of ["same.txt", "./same.txt", "nested/../same.txt"]) {
+          const { ctx, calls } = makeCtx()
+          yield* writeText(target, "before\n")
+          yield* execute(
+            {
+              patchText: `*** Begin Patch\n*** Update File: same.txt\n*** Move to: ${destination}\n@@\n-before\n+after\n*** End Patch`,
+            },
+            ctx,
+          )
+          expect(yield* readText(target)).toBe("after\n")
+          expect(calls[0].metadata.files[0]).toMatchObject({ type: "update", relativePath: "same.txt" })
+          expect(calls[0].metadata.files[0].movePath).toBeUndefined()
+        }
+      }),
+    { git: true },
+  )
+
+  it.instance(
     "permission metadata includes move file info",
     () =>
       Effect.gen(function* () {
