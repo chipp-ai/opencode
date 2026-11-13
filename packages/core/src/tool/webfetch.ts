@@ -2,7 +2,7 @@ export * as WebFetchTool from "./webfetch"
 
 import { ToolFailure } from "@opencode-ai/llm"
 import { Duration, Effect, Layer, Schema } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { Parser } from "htmlparser2"
 import TurndownService from "turndown"
 import { makeLocationNode } from "../effect/app-node"
@@ -84,10 +84,42 @@ const request = (url: string, format: Format, userAgent = browserUserAgent) =>
 
 const assertHttpUrl = (url: URL) => {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("URL must use http:// or https://")
+  if (url.username || url.password) throw new Error("URL must not include credentials")
 }
 
-const execute = (http: HttpClient.HttpClient, url: string, format: Format, userAgent = browserUserAgent) =>
-  http.execute(request(url, format, userAgent)).pipe(Effect.flatMap(HttpClientResponse.filterStatusOk))
+const MAX_REDIRECTS = 10
+const redirectStatuses = new Set([301, 302, 303, 307, 308])
+
+// Transport-level redirects bypass URL permissions. Follow each hop only after approval.
+const execute = (
+  http: HttpClient.HttpClient,
+  check: (url: string) => Effect.Effect<void, Error>,
+  url: string,
+  format: Format,
+  userAgent = browserUserAgent,
+  redirects = 0,
+): Effect.Effect<HttpClientResponse.HttpClientResponse, Error> =>
+  http.execute(request(url, format, userAgent)).pipe(
+    Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+    Effect.flatMap((response) => {
+      const location = response.headers.location
+      if (!redirectStatuses.has(response.status) || !location) return HttpClientResponse.filterStatusOk(response)
+      if (redirects >= MAX_REDIRECTS) return Effect.fail(new Error(`Too many redirects (more than ${MAX_REDIRECTS})`))
+      return Effect.gen(function* () {
+        const next = yield* Effect.try({
+          try: () => {
+            const target = new URL(location, url)
+            assertHttpUrl(target)
+            target.hash = ""
+            return target.href
+          },
+          catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+        })
+        yield* check(next)
+        return yield* execute(http, check, next, format, userAgent, redirects + 1)
+      })
+    }),
+  )
 
 const collectBody = (response: HttpClientResponse.HttpClientResponse) =>
   collectBoundedResponseBody(
@@ -130,24 +162,28 @@ const layer = Layer.effectDiscard(
           toModelOutput: ({ output }) => [{ type: "text", text: output.output }],
           execute: (input, context) =>
             Effect.gen(function* () {
+              // Preserve the written URL for existing rules, excluding fragments that are never sent.
+              const url = input.url.split("#")[0]
               yield* Effect.try({
-                try: () => assertHttpUrl(new URL(input.url)),
+                try: () => assertHttpUrl(new URL(url)),
                 catch: (error) => error,
               })
 
-              yield* permission.assert({
-                action: name,
-                resources: [input.url],
-                save: ["*"],
-                metadata: input,
-                sessionID: context.sessionID,
-                agent: context.agent,
-                source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
-              })
+              const check = (url: string) =>
+                permission.assert({
+                  action: name,
+                  resources: [url],
+                  save: ["*"],
+                  metadata: { ...input, url },
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
+                })
+              yield* check(url)
 
               const { body, contentType } = yield* Effect.gen(function* () {
-                const response = yield* execute(http, input.url, input.format).pipe(
-                  Effect.catchIf(isCloudflareChallenge, () => execute(http, input.url, input.format, "opencode")),
+                const response = yield* execute(http, check, url, input.format).pipe(
+                  Effect.catchIf(isCloudflareChallenge, () => execute(http, check, url, input.format, "opencode")),
                 )
                 const contentType = response.headers["content-type"] || ""
                 const mime = mimeFrom(contentType)
