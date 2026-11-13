@@ -6,6 +6,16 @@ Each entry names the upstream gap it addresses, whether it originated as our own
 
 ## Implemented
 
+### Selective upstream hardening (2026-11-13)
+
+Reviewed upstream `dev` at `f6e0c2d0833ffe772035f221fed923e1cd5fb408` against this fork at `04b37650c3e36d69da08aff9db28698fdf2f5360`. This is a bounded backport, not a V2.2 upgrade or a full upstream merge. See [the compatibility review](specs/upstream-sync-2026-11-13.md) for scope and deferred changes.
+
+- **Patch self-moves:** adapted the same-path guard from upstream `dc21f528ac` (#59197) to the legacy `apply_patch` implementation. A move to the same resolved path is an update, so writing the replacement no longer deletes it immediately afterward. Tests cover exact, `./`, and `nested/../` self-moves and permission metadata. This does not port upstream's multi-hunk virtual filesystem or case-only rename behavior. The fork's V2 patch tool already rejects moves.
+- **Read truncation:** adapted upstream `54de420baa` (#62575) to this fork's streaming reader. Truncation no longer splits a UTF-16 surrogate pair. Tests cover EOF, newline termination, and a line spanning multiple read chunks.
+- **Webfetch redirect permissions:** adapted upstream `17837a20d6` (#59748), URL credential/fragment handling from `125655ec6f` (#61701), and written-URL matching from `e803323c13` (#62373). The V2 tool follows at most ten redirects manually, checking each destination before fetching it. Credentials in URLs are rejected and fragments are removed before permission matching and transport. Existing written-URL matching is preserved. This fork uses its existing `permission.assert` on each hop, so a destination can require approval; upstream's newer deny-only permission helper is not available here. This change applies to V2 webfetch, not the separate legacy webfetch or a Code Mode fetch implementation.
+- **Regression evidence:** the new tests failed against the unchanged source, including an actual file deletion and a real HTTP request to a denied redirect destination. The fixes make those tests pass. Existing targeted baselines passed before the backport.
+- **Verified:** Bun 1.3.14. Core tools, model fallback, workflows, process-tree cleanup, idle leases, retry, and event-persist-policy: 199 tests pass across 22 files. Legacy patch: 29 tests pass. `bun typecheck` passes in both `packages/core` and `packages/opencode`. This is targeted regression coverage, not a full-repository or downstream production certification.
+
 ### `task` tool for V2 sessions (subagent dispatch) — Phase 0 of "switch the TUI to V2"
 
 Part of a staged plan to migrate the TUI's prompt path from the legacy V1 session loop to the V2 `SessionRunner`, so V2-only features already shipped this session (model fallback + circular fallback, unqueue/edit, and a planned model-switch toast/indicator) become reachable from real interactive TUI usage. That migration surfaced a hard prerequisite: V2's builtin tool tree had no `task` tool at all (the mechanism behind `@agent` subagent dispatch), a feature real TUI users exercise constantly — switching the TUI to V2 without it would silently break subagent delegation for everyone. This phase ports `task` to V2 and wires it into the real running server.

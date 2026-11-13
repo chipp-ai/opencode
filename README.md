@@ -15,7 +15,7 @@
 </p>
 
 > [!NOTE]
-> This is **[chipp-ai/opencode](https://github.com/chipp-ai/opencode)**, a public fork of [anomalyco/opencode](https://github.com/anomalyco/opencode) (formerly `sst/opencode`). We track upstream `dev` closely and carry a small set of fixes upstream hasn't merged yet — see [Fork changes](#fork-changes) below. Everything else in this README describes upstream OpenCode; only the Installation section differs for this fork.
+> This is **[chipp-ai/opencode](https://github.com/chipp-ai/opencode)**, a public fork of [anomalyco/opencode](https://github.com/anomalyco/opencode) (formerly `sst/opencode`). This fork has diverged from current upstream and incorporates selected compatible fixes. It is not a drop-in equivalent of the latest upstream release. See [Fork changes](#fork-changes) and the [upstream compatibility review](specs/upstream-sync-2026-11-13.md). The remaining upstream documentation may describe behavior that differs from this fork.
 
 <p align="center">
   <a href="README.md">English</a> |
@@ -48,7 +48,7 @@
 
 ### Fork changes
 
-This fork tracks upstream `dev` and adds a small set of features/fixes upstream hasn't merged — see **[FORK_CHANGES.md](./FORK_CHANGES.md)** for the full, maintained list (what's implemented, what's in progress, and why). Currently: subagent cost roll-up (implemented) and Claude-Code-style dynamic workflows (in progress).
+See **[FORK_CHANGES.md](./FORK_CHANGES.md)** for the feature history, verification records, and known gaps. Fork additions include subagent cost rollups, dynamic workflows, model fallback, provider discovery, queued-input editing, and headless runtime improvements. Historical entries describe the state when each change landed; later entries may supersede them.
 
 ### Installation
 
