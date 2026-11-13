@@ -248,7 +248,9 @@ export const read = Effect.fn("ReadTool.read")(function* (
           next = line
           return false
         }
-        const text = input.length > MAX_LINE_LENGTH ? input.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : input
+        const code = input.charCodeAt(MAX_LINE_LENGTH - 1)
+        const end = code >= 0xd800 && code <= 0xdbff ? MAX_LINE_LENGTH - 1 : MAX_LINE_LENGTH
+        const text = input.length > MAX_LINE_LENGTH ? input.slice(0, end) + MAX_LINE_SUFFIX : input
         const size = Buffer.byteLength(text, "utf-8") + (lines.length > 0 ? 1 : 0)
         if (bytes + size > MAX_READ_BYTES) {
           next = line

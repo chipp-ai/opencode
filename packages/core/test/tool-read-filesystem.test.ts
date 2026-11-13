@@ -100,6 +100,21 @@ describe("ReadToolFileSystem", () => {
     }),
   )
 
+  it.live("does not split surrogate pairs when truncating a long line", () =>
+    Effect.gen(function* () {
+      const { fs, files, directory } = yield* fixture
+      const file = path.join(directory, "long.txt")
+      for (const suffix of ["tail", "tail\n", "x".repeat(70_000)]) {
+        yield* files.writeFileString(file, `${"a".repeat(1_999)}\u{1F600}${suffix}`)
+        const result = yield* ReadToolFileSystem.read(fs, file, "long.txt", { limit: 1 })
+        expect(result).toMatchObject({
+          type: "text-page",
+          content: `${"a".repeat(1_999)}... (line truncated to 2000 chars)`,
+        })
+      }
+    }),
+  )
+
   it.effect("preserves the media ingestion limit message", () =>
     Effect.gen(function* () {
       const { fs, files, directory } = yield* fixture
