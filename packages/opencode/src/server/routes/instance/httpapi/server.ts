@@ -145,7 +145,9 @@ const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provi
 export const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
 const ptyConnectHttpApiAuthLayer = ptyConnectAuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
 const serverHttpApiAuthLayer = serverAuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
-const workspaceRoutingLive = workspaceRoutingLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal))
+// Exported so a route extension whose groups declare `WorkspaceRoutingMiddleware` and
+// `InstanceContextMiddleware` can provide the same implementations as the built-in instance routes.
+export const workspaceRoutingLive = workspaceRoutingLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal))
 const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
   Layer.provide([controlHandlers, controlPlaneHandlers, globalHandlers]),
   Layer.provide(schemaErrorLayer),
@@ -290,6 +292,8 @@ export type RouteOptions = {
   readonly routeExtensions?: ReadonlyArray<RouteExtension.RouteExtension>
   /** Transforms each durable event payload before it is written to the event log; see `EventV2.LayerOptions`. */
   readonly persist?: EventV2.LayerOptions["persist"]
+  /** Runs after each locally published durable event commits; see `EventV2.Deliver`. */
+  readonly deliver?: EventV2.Deliver
 }
 
 export function createRoutes(
@@ -348,7 +352,7 @@ export function createRoutes(
     // Not a `[EventV2.node, layer]` replacement: EventV2 is shared by every compile pass above (and the
     // module-level Location service maps inside route handlers), so a per-pass replacement would build a second,
     // disconnected instance. A Reference provided beneath all of them reaches the single memoized build.
-    Layer.provide(EventPersist.layer(options?.persist)),
+    Layer.provide(EventPersist.layer(options?.persist, options?.deliver)),
     // Same reasoning as EventPersist: a Reference beneath every pass lets V2 Integration read V1-saved keys.
     Layer.provide(LegacyCredential.layer),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,

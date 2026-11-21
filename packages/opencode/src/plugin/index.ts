@@ -31,6 +31,7 @@ import { parsePluginSpecifier, readPluginId, readV1Plugin, resolvePluginId } fro
 import { registerAdapter } from "@/control-plane/adapters"
 import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Embed } from "@/embed"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 
@@ -176,6 +177,18 @@ const layer = Layer.effect(
             Effect.option,
           )
           if (init._tag === "Some") hooks.push(init.value)
+        }
+
+        // Compiled into this build by an embedder, so a failed init fails the instance instead of being skipped.
+        for (const plugin of Embed.plugins()) {
+          hooks.push(
+            yield* Effect.tryPromise({ try: () => plugin(input), catch: errorMessage }).pipe(
+              Effect.tapError((error) =>
+                Effect.logError("failed to load embedded plugin", { name: plugin.name, error }),
+              ),
+              Effect.orDie,
+            ),
+          )
         }
 
         const plugins = flags.pure ? [] : (cfg.plugin_origins ?? [])

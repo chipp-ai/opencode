@@ -7,6 +7,7 @@ import { OpenApi } from "effect/unstable/httpapi"
 import { HttpTransport } from "#http-transport"
 import { ListenerServer } from "./listener-server"
 import { MDNS } from "./mdns"
+import { Embed } from "@/embed"
 import { HttpApiApp } from "./routes/instance/httpapi/server"
 import { disposeMiddleware } from "./routes/instance/httpapi/lifecycle"
 import { WebSocketTracker } from "./routes/instance/httpapi/websocket-tracker"
@@ -42,6 +43,8 @@ export type ListenOptions = CorsOptions & {
    * `OPENCODE_EVENT_REDACT_ENABLED`. Must be pure and idempotent; see `EventV2.LayerOptions["persist"]`.
    */
   persist?: EventV2.LayerOptions["persist"]
+  /** Embedder post-commit hook for durable events; see `EventV2.Deliver`. */
+  deliver?: EventV2.Deliver
 }
 type ListenerState = {
   scope: Scope.Scope
@@ -98,7 +101,13 @@ const listenEffect: (opts: ListenOptions) => Effect.Effect<EffectListener, unkno
 )
 
 function listenerLayer(opts: ListenOptions, port: number) {
-  return HttpRouter.serve(HttpApiApp.createRoutes(opts, { routeExtensions: opts.routeExtensions, persist: opts.persist }), {
+  // Contributions registered by a build-time embedder (see `Embed`) apply to every listener.
+  const routes = HttpApiApp.createRoutes(opts, {
+    routeExtensions: [...Embed.routeExtensions(), ...(opts.routeExtensions ?? [])],
+    persist: opts.persist ?? Embed.persist(),
+    deliver: opts.deliver ?? Embed.deliver(),
+  })
+  return HttpRouter.serve(routes, {
     middleware: disposeMiddleware,
     disableLogger: true,
     disableListenLog: true,
