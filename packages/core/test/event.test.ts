@@ -1232,11 +1232,96 @@ describe("EventV2", () => {
           Layer.provide(database),
           Layer.provide(Layer.succeed(EventV2.Persist, EventPersistPolicy.apply)),
         )
-        const stored = yield* publishTitle(`leaked ${secret}`).pipe(
-          Effect.provide(Layer.merge(database, eventLayer)),
-        )
+        const stored = yield* publishTitle(`leaked ${secret}`).pipe(Effect.provide(Layer.merge(database, eventLayer)))
         expect(stored).toEqual(["explicit"])
       }),
     )
+  })
+
+  describe("deliver hook", () => {
+    const withDeliver = <A, E>(
+      deliver: EventV2.Deliver,
+      effect: Effect.Effect<A, E, EventV2.Service | Database.Service>,
+      persist?: EventV2.LayerOptions["persist"],
+    ) => {
+      const database = LayerNode.compile(Database.node)
+      const eventLayer = EventV2.layerWith({ deliver, persist }).pipe(Layer.provide(database))
+      return effect.pipe(Effect.provide(Layer.merge(database, eventLayer)))
+    }
+
+    it.effect(
+      "receives each committed durable event with its sequence and stored payload before publish returns",
+      () => {
+        const delivered = new Array<EventV2.Delivery>()
+        return withDeliver(
+          (delivery) => Effect.sync(() => delivered.push(delivery)),
+          Effect.gen(function* () {
+            const events = yield* EventV2.Service
+            const sessionID = Session.ID.create()
+            const first = yield* events.publish(SessionEvent.TitleChanged, {
+              sessionID,
+              timestamp: DateTime.makeUnsafe(1),
+              title: "one",
+            })
+            expect(delivered).toHaveLength(1)
+            yield* events.publish(SessionEvent.TitleChanged, {
+              sessionID,
+              timestamp: DateTime.makeUnsafe(2),
+              title: "two",
+            })
+            expect(delivered.map((item) => [item.aggregateID, item.seq, item.data.title])).toEqual([
+              [sessionID, 0, "stored one"],
+              [sessionID, 1, "stored two"],
+            ])
+            expect(delivered[0]?.id).toBe(first.id)
+            expect(delivered[0]?.type).toBe(EventV2.versionedType(SessionEvent.TitleChanged.type, 1))
+            expect((delivered[0]?.event.data as { title: string }).title).toBe("one")
+          }),
+          (data) => ({ ...data, title: `stored ${data.title}` }),
+        )
+      },
+    )
+
+    it.effect("propagates a delivery failure to the publisher after the local commit", () =>
+      withDeliver(
+        () => Effect.die(new Error("remote refused")),
+        Effect.gen(function* () {
+          const events = yield* EventV2.Service
+          const { db } = yield* Database.Service
+          const sessionID = Session.ID.create()
+          const exit = yield* events
+            .publish(SessionEvent.TitleChanged, { sessionID, timestamp: DateTime.makeUnsafe(1), title: "kept" })
+            .pipe(Effect.exit)
+          expect(Exit.isFailure(exit)).toBe(true)
+          const rows = yield* db
+            .select()
+            .from(EventTable)
+            .where(eq(EventTable.aggregate_id, sessionID))
+            .all()
+            .pipe(Effect.orDie)
+          expect(rows).toHaveLength(1)
+        }),
+      ),
+    )
+
+    it.effect("is not called for replayed events or non-durable events", () => {
+      const delivered = new Array<EventV2.Delivery>()
+      return withDeliver(
+        (delivery) => Effect.sync(() => delivered.push(delivery)),
+        Effect.gen(function* () {
+          const events = yield* EventV2.Service
+          const sessionID = Session.ID.create()
+          yield* events.replay({
+            id: EventV2.ID.create(),
+            type: EventV2.versionedType(SessionEvent.TitleChanged.type, 1),
+            seq: 0,
+            aggregateID: sessionID,
+            data: { sessionID, timestamp: 1, title: "restored" },
+          })
+          yield* events.publish(Message, { text: "telemetry" })
+          expect(delivered).toHaveLength(0)
+        }),
+      )
+    })
   })
 })

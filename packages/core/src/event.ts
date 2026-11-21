@@ -172,7 +172,36 @@ export interface LayerOptions {
    * payload, but the event log, `durable()` streams, and history reads return the transformed copy.
    */
   readonly persist?: (data: Record<string, unknown>) => Record<string, unknown>
+  /** Runs after each locally published durable event commits; see `Deliver`. */
+  readonly deliver?: Deliver
 }
+
+/** A durable event as it was just committed to the event log. */
+export interface Delivery {
+  readonly id: ID
+  readonly aggregateID: string
+  readonly seq: number
+  /** The versioned durable type stored in the event log, which replay decodes by. */
+  readonly type: string
+  /** The stored payload, after `persist`. */
+  readonly data: Record<string, unknown>
+  /** The event as published, before encoding or `persist`. */
+  readonly event: Payload
+}
+
+/**
+ * Effectful post-commit hook for durable events, for a downstream that replicates the event log elsewhere.
+ * It runs after the local transaction commits and before `publish` returns, so `publish` waits for it and a
+ * failure or defect propagates to the publisher. That lets a caller gate its next action on remote
+ * acknowledgment. It may use the event log's own database, e.g. for a delivery cursor. It is not called for
+ * replayed events, which already have a durable home.
+ */
+export type Deliver = (delivery: Delivery) => Effect.Effect<void, never, Database.Service>
+
+/** Composition-root default for `LayerOptions.deliver`, provided the same way as `Persist`. */
+export const Deliver = Context.Reference<Deliver | undefined>("@opencode/EventV2/Deliver", {
+  defaultValue: () => undefined,
+})
 
 /**
  * Composition-root default for `LayerOptions.persist`, read when the layer is built and used only when no
@@ -190,6 +219,7 @@ export const layerWith = (options?: LayerOptions) =>
     Service,
     Effect.gen(function* () {
       const persist = options?.persist ?? (yield* Persist)
+      const deliver = options?.deliver ?? (yield* Deliver)
       const pubsub = {
         all: yield* PubSub.unbounded<Payload>(),
         durable: new Map<string, Set<PubSub.PubSub<void>>>(),
@@ -198,7 +228,8 @@ export const layerWith = (options?: LayerOptions) =>
       const projectors = new Map<string, Subscriber[]>()
       // TODO: Bind durable projectors to exact type+version before supporting incompatible historical payloads.
       const listeners = new Array<Subscriber>()
-      const { db } = yield* Database.Service
+      const database = yield* Database.Service
+      const db = database.db
 
       const getOrCreate = (definition: Definition) =>
         Effect.gen(function* () {
@@ -363,7 +394,7 @@ export const layerWith = (options?: LayerOptions) =>
                             ])
                             .run()
                             .pipe(Effect.orDie)
-                          return { aggregateID, seq }
+                          return { aggregateID, seq, data: encoded }
                         }),
                       { behavior: "immediate" },
                     )
@@ -374,6 +405,15 @@ export const layerWith = (options?: LayerOptions) =>
                       (wake) => PubSub.publish(wake, undefined),
                       { discard: true },
                     )
+                    if (deliver && !input)
+                      yield* deliver({
+                        id: event.id,
+                        aggregateID: committed.aggregateID,
+                        seq: committed.seq,
+                        type: versionedType(definition.type, durable.version),
+                        data: committed.data,
+                        event,
+                      }).pipe(Effect.provideService(Database.Service, database))
                   }
                   return committed
                 }),
