@@ -28,12 +28,35 @@ const fromRow = (row: typeof SessionInputTable.$inferSelect): Admitted =>
     timeCreated: DateTime.makeUnsafe(row.time_created),
     ...(row.promoted_seq === null ? {} : { promotedSeq: row.promoted_seq }),
     ...(row.withdrawn_seq === null ? {} : { withdrawnSeq: row.withdrawn_seq }),
+    ...(row.command_id === null ? {} : { commandId: row.command_id }),
+    ...(row.input_fingerprint === null ? {} : { inputFingerprint: row.input_fingerprint }),
   })
 
 export const find = Effect.fn("SessionInput.find")(function* (db: DatabaseService, id: SessionMessage.ID) {
   const row = yield* db.select().from(SessionInputTable).where(eq(SessionInputTable.id, id)).get().pipe(Effect.orDie)
   return row === undefined ? undefined : fromRow(row)
 })
+
+/** Looks up an admitted prompt by the idempotency key an external system delivered it with. */
+export const findByCommand = Effect.fn("SessionInput.findByCommand")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  commandId: string,
+) {
+  const row = yield* db
+    .select()
+    .from(SessionInputTable)
+    .where(and(eq(SessionInputTable.session_id, sessionID), eq(SessionInputTable.command_id, commandId)))
+    .get()
+    .pipe(Effect.orDie)
+  return row === undefined ? undefined : fromRow(row)
+})
+
+/** A command id was delivered again with different content than the prompt already admitted under it. */
+export class CommandConflict extends Schema.TaggedErrorClass<CommandConflict>()("SessionInput.CommandConflict", {
+  sessionID: SessionSchema.ID,
+  commandId: Schema.String,
+}) {}
 
 export class LifecycleConflict extends Schema.TaggedErrorClass<LifecycleConflict>()("SessionInput.LifecycleConflict", {
   id: SessionMessage.ID,
@@ -47,8 +70,19 @@ export const admit = Effect.fn("SessionInput.admit")(function* (
     readonly sessionID: SessionSchema.ID
     readonly prompt: Prompt
     readonly delivery: Delivery
+    /**
+     * Idempotency key from an external system. A retry with the same key returns the prompt already admitted
+     * under it, whatever message id the retry carries; a different `inputFingerprint` dies with `CommandConflict`.
+     */
+    readonly commandId?: string
+    readonly inputFingerprint?: string
   },
 ) {
+  const command =
+    input.commandId === undefined ? undefined : { id: input.commandId, fingerprint: input.inputFingerprint }
+  const byCommand = command === undefined ? undefined : yield* findByCommand(db, input.sessionID, command.id)
+  if (command !== undefined && byCommand !== undefined)
+    return yield* reconcileCommand(byCommand, input.sessionID, command)
   const existing = yield* find(db, input.id)
   if (existing !== undefined) return existing
   const timestamp = yield* DateTime.now
@@ -59,6 +93,8 @@ export const admit = Effect.fn("SessionInput.admit")(function* (
       timestamp,
       prompt: input.prompt,
       delivery: input.delivery,
+      ...(command === undefined ? {} : { commandId: command.id }),
+      ...(command?.fingerprint === undefined ? {} : { inputFingerprint: command.fingerprint }),
     })
     .pipe(
       Effect.flatMap((event) =>
@@ -72,14 +108,34 @@ export const admit = Effect.fn("SessionInput.admit")(function* (
                 prompt: input.prompt,
                 delivery: input.delivery,
                 timeCreated: timestamp,
+                ...(command === undefined ? {} : { commandId: command.id }),
+                ...(command?.fingerprint === undefined ? {} : { inputFingerprint: command.fingerprint }),
               }),
             ),
       ),
+      // A concurrent delivery of the same command can win the unique index; resolve to whichever row was stored.
       Effect.catchDefect((defect) =>
-        find(db, input.id).pipe(Effect.flatMap((stored) => (stored ? Effect.succeed(stored) : Effect.die(defect)))),
+        Effect.gen(function* () {
+          const stored = yield* find(db, input.id)
+          if (stored !== undefined) return stored
+          const raced = command === undefined ? undefined : yield* findByCommand(db, input.sessionID, command.id)
+          if (command !== undefined && raced !== undefined)
+            return yield* reconcileCommand(raced, input.sessionID, command)
+          return yield* Effect.die(defect)
+        }),
       ),
     )
 })
+
+function reconcileCommand(
+  stored: Admitted,
+  sessionID: SessionSchema.ID,
+  command: { readonly id: string; readonly fingerprint?: string },
+) {
+  if (command.fingerprint !== undefined && stored.inputFingerprint !== command.fingerprint)
+    return Effect.die(new CommandConflict({ sessionID, commandId: command.id }))
+  return Effect.succeed(stored)
+}
 
 export const projectAdmitted = Effect.fn("SessionInput.projectAdmitted")(function* (
   db: DatabaseService,
@@ -90,6 +146,8 @@ export const projectAdmitted = Effect.fn("SessionInput.projectAdmitted")(functio
     readonly prompt: Prompt
     readonly delivery: Delivery
     readonly timeCreated: DateTime.Utc
+    readonly commandId?: string
+    readonly inputFingerprint?: string
   },
 ) {
   const message = yield* db
@@ -108,6 +166,8 @@ export const projectAdmitted = Effect.fn("SessionInput.projectAdmitted")(functio
       prompt: encodePrompt(input.prompt),
       delivery: input.delivery,
       time_created: DateTime.toEpochMillis(input.timeCreated),
+      command_id: input.commandId ?? null,
+      input_fingerprint: input.inputFingerprint ?? null,
     })
     .onConflictDoNothing()
     .returning({ id: SessionInputTable.id })

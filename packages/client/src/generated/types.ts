@@ -539,6 +539,8 @@ export type SessionsPromptOutput = {
     readonly timeCreated: number
     readonly promotedSeq?: number
     readonly withdrawnSeq?: number
+    readonly commandId?: string
+    readonly inputFingerprint?: string
   }
 }["data"]
 
@@ -570,6 +572,8 @@ export type SessionsListInputsOutput = {
     readonly timeCreated: number
     readonly promotedSeq?: number
     readonly withdrawnSeq?: number
+    readonly commandId?: string
+    readonly inputFingerprint?: string
   }>
 }["data"]
 
@@ -622,6 +626,8 @@ export type SessionsReviseInputOutput = {
     readonly timeCreated: number
     readonly promotedSeq?: number
     readonly withdrawnSeq?: number
+    readonly commandId?: string
+    readonly inputFingerprint?: string
   }
 }["data"]
 
@@ -788,6 +794,8 @@ export type SessionsCommandOutput = {
           readonly timeCreated: number
           readonly promotedSeq?: number
           readonly withdrawnSeq?: number
+          readonly commandId?: string
+          readonly inputFingerprint?: string
         }
       }
     | { readonly type: "subtask"; readonly sessionID: string; readonly text: string; readonly error?: string | null }
@@ -1236,6 +1244,8 @@ export type SessionsHistoryOutput = {
             readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
           }
           readonly delivery: "steer" | "queue"
+          readonly commandId?: string
+          readonly inputFingerprint?: string
         }
       }
     | {
@@ -1953,6 +1963,8 @@ export type SessionsEventsOutput =
           readonly modelOverride?: { readonly id: string; readonly providerID: string; readonly variant?: string }
         }
         readonly delivery: "steer" | "queue"
+        readonly commandId?: string
+        readonly inputFingerprint?: string
       }
     }
   | {

@@ -116,7 +116,12 @@ export type Prompted = typeof Prompted.Type
 export const PromptAdmitted = Event.define({
   type: "session.next.prompt.admitted",
   ...options,
-  schema: PromptFields,
+  schema: {
+    ...PromptFields,
+    // Present only when an external system delivered the prompt with an idempotency key (see SessionInput.Admitted).
+    commandId: Schema.String.pipe(optional),
+    inputFingerprint: Schema.String.pipe(optional),
+  },
 })
 export type PromptAdmitted = typeof PromptAdmitted.Type
 

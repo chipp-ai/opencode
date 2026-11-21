@@ -163,6 +163,8 @@ export default {
           \`admitted_seq\` integer NOT NULL,
           \`promoted_seq\` integer,
           \`withdrawn_seq\` integer,
+          \`command_id\` text,
+          \`input_fingerprint\` text,
           \`time_created\` integer NOT NULL,
           CONSTRAINT \`fk_session_input_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
         );
@@ -270,6 +272,9 @@ export default {
       )
       yield* tx.run(
         `CREATE UNIQUE INDEX \`session_input_session_promoted_seq_idx\` ON \`session_input\` (\`session_id\`,\`promoted_seq\`);`,
+      )
+      yield* tx.run(
+        `CREATE UNIQUE INDEX \`session_input_session_command_idx\` ON \`session_input\` (\`session_id\`,\`command_id\`);`,
       )
       yield* tx.run(
         `CREATE UNIQUE INDEX \`session_message_session_seq_idx\` ON \`session_message\` (\`session_id\`,\`seq\`);`,

@@ -390,6 +390,8 @@ const layer = Layer.effectDiscard(
           prompt: event.data.prompt,
           delivery: event.data.delivery,
           timeCreated: event.data.timestamp,
+          commandId: event.data.commandId,
+          inputFingerprint: event.data.inputFingerprint,
         })
       }),
     )

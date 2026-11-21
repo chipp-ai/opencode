@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "19ce86bc-1c06-4dd4-9225-0f8f9010e347",
+  "id": "7385dcd0-931c-4488-96ae-777d730ac609",
   "prevIds": [
-    "f689c2f4-5fe5-4eed-b043-1ec548d2c919"
+    "19ce86bc-1c06-4dd4-9225-0f8f9010e347"
   ],
   "ddl": [
     {
@@ -993,6 +993,26 @@
       "default": null,
       "generated": null,
       "name": "withdrawn_seq",
+      "entityType": "columns",
+      "table": "session_input"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "command_id",
+      "entityType": "columns",
+      "table": "session_input"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "input_fingerprint",
       "entityType": "columns",
       "table": "session_input"
     },
@@ -2159,6 +2179,24 @@
       "where": null,
       "origin": "manual",
       "name": "session_input_session_promoted_seq_idx",
+      "entityType": "indexes",
+      "table": "session_input"
+    },
+    {
+      "columns": [
+        {
+          "value": "session_id",
+          "isExpression": false
+        },
+        {
+          "value": "command_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "session_input_session_command_idx",
       "entityType": "indexes",
       "table": "session_input"
     },

@@ -151,6 +151,10 @@ export const SessionInputTable = sqliteTable(
     promoted_seq: integer(),
     // Tombstone for inputs withdrawn before promotion; the row keeps its ID so it can never be re-admitted.
     withdrawn_seq: integer(),
+    // Caller-supplied idempotency key for an externally delivered prompt, and a fingerprint of its content.
+    // NULL for ordinary prompts; SQLite treats NULLs as distinct in the unique index below.
+    command_id: text(),
+    input_fingerprint: text(),
     time_created: integer()
       .notNull()
       .$default(() => Date.now()),
@@ -164,6 +168,7 @@ export const SessionInputTable = sqliteTable(
     ),
     uniqueIndex("session_input_session_admitted_seq_idx").on(table.session_id, table.admitted_seq),
     uniqueIndex("session_input_session_promoted_seq_idx").on(table.session_id, table.promoted_seq),
+    uniqueIndex("session_input_session_command_idx").on(table.session_id, table.command_id),
   ],
 )
 
