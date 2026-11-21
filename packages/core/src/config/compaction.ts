@@ -12,4 +12,7 @@ export class Info extends Schema.Class<Info>("ConfigV2.Compaction")({
   prune: Schema.Boolean.pipe(Schema.optional),
   keep: Keep.pipe(Schema.optional),
   buffer: NonNegativeInt.pipe(Schema.optional),
+  threshold: Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1)).pipe(Schema.optional),
+  min_steps_between: NonNegativeInt.pipe(Schema.optional),
+  floor_margin: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThan(1)).pipe(Schema.optional),
 }) {}

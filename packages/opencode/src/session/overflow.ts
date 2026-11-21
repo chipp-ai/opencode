@@ -19,6 +19,20 @@ export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outpu
     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
 }
 
+/**
+ * Tokens at which automatic compaction starts: `compaction.threshold` of the
+ * usable window, or the whole usable window when no threshold is set.
+ */
+export function trigger(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
+  const room = usable(input)
+  const threshold = input.cfg.compaction?.threshold
+  return threshold === undefined ? room : Math.floor(room * threshold)
+}
+
+export function count(tokens: SessionV1.Assistant["tokens"]) {
+  return tokens.total || tokens.input + tokens.output + tokens.cache.read + tokens.cache.write
+}
+
 export function isOverflow(input: {
   cfg: ConfigV1.Info
   tokens: SessionV1.Assistant["tokens"]
@@ -28,7 +42,5 @@ export function isOverflow(input: {
   if (input.cfg.compaction?.auto === false) return false
   if (input.model.limit.context === 0) return false
 
-  const count =
-    input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
-  return count >= usable(input)
+  return count(input.tokens) >= trigger(input)
 }

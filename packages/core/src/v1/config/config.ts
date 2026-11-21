@@ -176,6 +176,18 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      threshold: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1))).annotate({
+        description:
+          "Fraction of the usable window at which automatic compaction starts, for example 0.8 (default: 1, compact only when the usable window is full)",
+      }),
+      min_steps_between: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Fewest model steps after a compaction before another automatic compaction may run. Below it the session goes on uncompacted and stops at the real context limit instead (default: 0)",
+      }),
+      floor_margin: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThan(1))).annotate({
+        description:
+          "Loop guard. When the first step after a compaction already reads at least threshold x (1 - floor_margin) tokens, a compaction cannot make room, so automatic compaction is refused until the next manual one (default: no check)",
+      }),
     }),
   ),
   experimental: Schema.optional(

@@ -15,6 +15,7 @@ import { NotFoundError } from "@/storage/storage"
 import { Effect, Layer, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
+import { CompactionGuard } from "./compaction-guard"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -168,6 +169,12 @@ export interface Interface {
     model: Provider.Model
   }) => Effect.Effect<boolean>
   readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
+  /** May an AUTOMATIC compaction run now? Manual compactions never ask. */
+  readonly guard: (input: {
+    messages: readonly SessionV1.WithParts[]
+    model: Provider.Model
+    current?: SessionV1.Assistant
+  }) => Effect.Effect<CompactionGuard.Verdict>
   readonly process: (input: {
     parentID: MessageID
     messages: SessionV1.WithParts[]
@@ -210,6 +217,22 @@ const layer = Layer.effect(
         model: input.model,
         outputTokenMax: flags.outputTokenMax,
       })
+    })
+
+    const guard = Effect.fn("SessionCompaction.guard")(function* (input: {
+      messages: readonly SessionV1.WithParts[]
+      model: Provider.Model
+      current?: SessionV1.Assistant
+    }) {
+      const verdict = CompactionGuard.guard({
+        cfg: yield* config.get(),
+        model: input.model,
+        outputTokenMax: flags.outputTokenMax,
+        messages: input.messages.map((m) => m.info),
+        current: input.current,
+      })
+      if (!verdict.allow) yield* Effect.logWarning("automatic compaction refused", verdict)
+      return verdict
     })
 
     const estimate = Effect.fn("SessionCompaction.estimate")(function* (input: {
@@ -584,6 +607,7 @@ const layer = Layer.effect(
     return Service.of({
       isOverflow,
       prune,
+      guard,
       process: processCompaction,
       create,
     })

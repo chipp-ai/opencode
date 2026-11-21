@@ -1161,7 +1161,8 @@ const layer = Layer.effect(
           if (
             lastFinished &&
             lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
+            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model })) &&
+            (yield* compaction.guard({ messages: msgs, model })).allow
           ) {
             yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
             continue
@@ -1318,13 +1319,27 @@ const layer = Layer.effect(
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
-              yield* compaction.create({
-                sessionID,
-                agent: lastUser.agent,
-                model: lastUser.model,
-                auto: true,
-                overflow: !handle.message.finish,
-              })
+              const verdict = yield* compaction.guard({ messages: msgs, model, current: handle.message })
+              if (verdict.allow) {
+                yield* compaction.create({
+                  sessionID,
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                  auto: true,
+                  overflow: !handle.message.finish,
+                })
+              } else if (!handle.message.finish) {
+                // The provider refused the request as too long and the guard
+                // refused to compact: stop as with compaction.auto false, so
+                // the person decides.
+                handle.message.error = new SessionV1.ContextOverflowError({
+                  message: `Automatic compaction refused (${verdict.reason}); the conversation is full.`,
+                }).toObject()
+                handle.message.finish = "error"
+                yield* sessions.updateMessage(handle.message)
+                yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
+                return "break" as const
+              }
             }
             return "continue" as const
           }).pipe(
