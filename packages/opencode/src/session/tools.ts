@@ -109,9 +109,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { args },
             )
             const result = yield* item.execute(args, ctx)
+            const capped = Truncate.capAttachments(result.attachments, (yield* truncate.limits()).maxAttachments)
             const output = {
               ...result,
-              attachments: result.attachments?.map((attachment) => ({
+              output: result.output + capped.note,
+              attachments: capped.kept?.map((attachment) => ({
                 ...attachment,
                 id: PartID.ascending(),
                 sessionID: ctx.sessionID,
@@ -352,6 +354,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
             const formatted = formatMcpResourceContent(parsed.server, parsed.uri, content)
             const truncated = yield* truncate.output(formatted.text, {}, input.agent)
+            const cappedResource = Truncate.capAttachments(
+              formatted.attachments,
+              (yield* truncate.limits()).maxAttachments,
+            )
             const output = {
               title: `MCP resource: ${parsed.uri}`,
               metadata: {
@@ -362,8 +368,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                 truncated: truncated.truncated,
                 ...(truncated.truncated && { outputPath: truncated.outputPath }),
               },
-              output: truncated.content,
-              attachments: formatted.attachments.map((attachment) => ({
+              output: truncated.content + cappedResource.note,
+              attachments: (cappedResource.kept ?? []).map((attachment) => ({
                 ...attachment,
                 id: PartID.ascending(),
                 sessionID: ctx.sessionID,
@@ -462,6 +468,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           }
 
           const truncated = yield* truncate.output(textParts.join("\n\n"), {}, input.agent)
+          const cappedMcp = Truncate.capAttachments(attachments, (yield* truncate.limits()).maxAttachments)
           const metadata = {
             ...result.metadata,
             truncated: truncated.truncated,
@@ -471,8 +478,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           const output = {
             title: "",
             metadata,
-            output: truncated.content,
-            attachments: attachments.map((attachment) => ({
+            output: truncated.content + cappedMcp.note,
+            attachments: (cappedMcp.kept ?? []).map((attachment) => ({
               ...attachment,
               id: PartID.ascending(),
               sessionID: ctx.sessionID,

@@ -8,6 +8,7 @@ import DESCRIPTION from "./read.txt"
 import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
+import { Truncate } from "./truncate"
 import { Agent } from "@/agent/agent"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 
@@ -65,13 +66,14 @@ type Metadata = {
 export const ReadTool = Tool.define<
   typeof Parameters,
   Metadata,
-  FSUtil.Service | Instruction.Service | LSP.Service | Scope.Scope | Agent.Service
+  FSUtil.Service | Instruction.Service | LSP.Service | Scope.Scope | Agent.Service | Truncate.Service
 >(
   "read",
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
     const instruction = yield* Instruction.Service
     const agents = yield* Agent.Service
+    const truncate = yield* Truncate.Service
     const lsp = yield* LSP.Service
     const scope = yield* Scope.Scope
 
@@ -357,7 +359,8 @@ export const ReadTool = Tool.define<
       yield* warm(filepath)
 
       if (loaded.length > 0) {
-        output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+        const { maxInstructionBytes } = yield* truncate.limits()
+        output += `\n\n<system-reminder>\n${loaded.map((item) => Truncate.capInstruction(item, maxInstructionBytes)).join("\n\n")}\n</system-reminder>`
       }
 
       return {

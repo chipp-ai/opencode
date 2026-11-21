@@ -21,7 +21,86 @@ export type Result = { content: string; truncated: false } | { content: string; 
 export interface Options {
   maxLines?: number
   maxBytes?: number
-  direction?: "head" | "tail"
+  direction?: "head" | "tail" | "head_tail"
+}
+
+export interface Limits {
+  maxLines: number
+  maxBytes: number
+  /** `tool_output.preview`: the direction used when a caller does not pass one. */
+  preview?: "head" | "head_tail"
+  /** `tool_output.max_attachments`; undefined means no limit. */
+  maxAttachments?: number
+  /** `tool_output.max_instruction_bytes`; undefined means no limit. */
+  maxInstructionBytes?: number
+}
+
+function take(lines: string[], maxLines: number, maxBytes: number, fromEnd: boolean) {
+  const out: string[] = []
+  let bytes = 0
+  let hitBytes = false
+  for (let n = 0; n < lines.length && out.length < maxLines; n++) {
+    const line = fromEnd ? lines[lines.length - 1 - n] : lines[n]
+    const size = Buffer.byteLength(line, "utf-8") + (out.length > 0 ? 1 : 0)
+    if (bytes + size > maxBytes) {
+      hitBytes = true
+      break
+    }
+    if (fromEnd) out.unshift(line)
+    else out.push(line)
+    bytes += size
+  }
+  return { out, bytes, hitBytes }
+}
+
+/**
+ * Pure: an instruction file's text for a read result, cut to `maxBytes` (whole
+ * when `maxBytes` is undefined or the text fits). A cut file ends with its
+ * path and size, so the agent can read the rest with offset/limit.
+ */
+export function capInstruction(item: { filepath: string; content: string }, maxBytes: number | undefined) {
+  const total = Buffer.byteLength(item.content, "utf-8")
+  if (maxBytes === undefined || total <= maxBytes) return item.content
+  const kept = take(item.content.split("\n"), Number.MAX_SAFE_INTEGER, maxBytes, false)
+  return `${kept.out.join("\n")}\n\n(Instruction file cut: showing ${kept.bytes} of ${total} bytes. Read ${item.filepath} with offset/limit for the rest, or Grep it for a topic.)`
+}
+
+/**
+ * Pure: keep at most `max` attachments of one tool result (all of them when
+ * `max` is undefined). The note tells the model how many were dropped, so it
+ * can ask for one at a time instead of reading the result as complete.
+ */
+export function capAttachments<T>(attachments: readonly T[] | undefined, max: number | undefined) {
+  const list = attachments ?? []
+  if (max === undefined || list.length <= max) return { kept: attachments, note: "" }
+  const dropped = list.length - max
+  return {
+    kept: list.slice(0, max),
+    note: `\n\n(${dropped} of ${list.length} attachments omitted: one tool result keeps at most ${max}. Ask for the others one at a time.)`,
+  }
+}
+
+/**
+ * Pure: the first and last parts of `text`, each within half the limits, with
+ * the counts of what was left out. Lines never repeat between the two parts.
+ */
+export function headTail(text: string, maxLines: number, maxBytes: number) {
+  const lines = text.split("\n")
+  const halfLines = Math.max(1, Math.floor(maxLines / 2))
+  const halfBytes = Math.max(1, Math.floor(maxBytes / 2))
+  const head = take(lines, halfLines, halfBytes, false)
+  const rest = lines.slice(head.out.length)
+  const tail = take(rest, halfLines, halfBytes, true)
+  const omittedLines = lines.length - head.out.length - tail.out.length
+  const totalBytes = Buffer.byteLength(text, "utf-8")
+  return {
+    head: head.out.join("\n"),
+    tail: tail.out.join("\n"),
+    omittedLines,
+    omittedBytes: Math.max(0, totalBytes - head.bytes - tail.bytes - (tail.out.length > 0 ? 1 : 0)),
+    totalLines: lines.length,
+    totalBytes,
+  }
 }
 
 function hasTaskTool(agent?: Agent.Info) {
@@ -40,7 +119,7 @@ export interface Interface {
   /**
    * Resolved truncation limits: values from `tool_output` in opencode config, or MAX_LINES / MAX_BYTES if unset.
    */
-  readonly limits: () => Effect.Effect<{ maxLines: number; maxBytes: number }>
+  readonly limits: () => Effect.Effect<Limits>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Truncate") {}
@@ -74,24 +153,50 @@ const layer = Layer.effect(
 
     const limits = Effect.fn("Truncate.limits")(function* () {
       const configSvc = yield* Effect.serviceOption(Config.Service)
-      if (Option.isNone(configSvc)) return { maxLines: MAX_LINES, maxBytes: MAX_BYTES }
+      if (Option.isNone(configSvc)) return { maxLines: MAX_LINES, maxBytes: MAX_BYTES, preview: "head" } satisfies Limits
       const cfg = yield* configSvc.value.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
       return {
         maxLines: cfg?.tool_output?.max_lines ?? MAX_LINES,
         maxBytes: cfg?.tool_output?.max_bytes ?? MAX_BYTES,
-      }
+        preview: cfg?.tool_output?.preview ?? "head",
+        maxAttachments: cfg?.tool_output?.max_attachments,
+        maxInstructionBytes: cfg?.tool_output?.max_instruction_bytes,
+      } satisfies Limits
     })
 
     const output = Effect.fn("Truncate.output")(function* (text: string, options: Options = {}, agent?: Agent.Info) {
       const resolved = yield* limits()
       const maxLines = options.maxLines ?? resolved.maxLines
       const maxBytes = options.maxBytes ?? resolved.maxBytes
-      const direction = options.direction ?? "head"
+      const direction = options.direction === "tail" ? "tail" : "head"
       const lines = text.split("\n")
       const totalBytes = Buffer.byteLength(text, "utf-8")
 
       if (lines.length <= maxLines && totalBytes <= maxBytes) {
         return { content: text, truncated: false } as const
+      }
+
+      const hintFor = (file: string) =>
+        hasTaskTool(agent)
+          ? `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
+          : `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
+
+      if ((options.direction ?? resolved.preview) === "head_tail") {
+        const cut = headTail(text, maxLines, maxBytes)
+        const file = yield* write(text)
+        return {
+          content: [
+            cut.head,
+            "",
+            `...${cut.omittedLines} lines (${cut.omittedBytes} bytes) omitted of ${cut.totalLines} lines (${cut.totalBytes} bytes)...`,
+            "",
+            hintFor(file),
+            "",
+            cut.tail,
+          ].join("\n"),
+          truncated: true,
+          outputPath: file,
+        } as const
       }
 
       const out: string[] = []
@@ -126,9 +231,7 @@ const layer = Layer.effect(
       const preview = out.join("\n")
       const file = yield* write(text)
 
-      const hint = hasTaskTool(agent)
-        ? `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
-        : `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
+      const hint = hintFor(file)
 
       return {
         content:

@@ -141,6 +141,18 @@ export const Info = Schema.Struct({
       max_bytes: Schema.optional(PositiveInt).annotate({
         description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)",
       }),
+      preview: Schema.optional(Schema.Literals(["head", "head_tail"])).annotate({
+        description:
+          "What a truncated result shows: the first part only (head, default), or the first and last parts with byte and line counts (head_tail)",
+      }),
+      max_attachments: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Maximum file attachments (for example screenshots) kept from one tool result; extra ones are dropped with a note (default: no limit)",
+      }),
+      max_instruction_bytes: Schema.optional(PositiveInt).annotate({
+        description:
+          "Maximum bytes of one instruction file (AGENTS.md, CLAUDE.md) that the read tool appends to its result; a larger file is shown as its first part plus its path and size (default: no limit)",
+      }),
     }),
   ).annotate({
     description:

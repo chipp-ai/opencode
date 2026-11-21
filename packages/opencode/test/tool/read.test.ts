@@ -59,6 +59,25 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
 
 const it = testEffect(Layer.mergeAll(readLayer(), testInstanceStoreLayer))
 
+// Config in the caller's context, as in a session: Truncate.limits() reads it from there.
+const itWithConfig = testEffect(
+  Layer.mergeAll(
+    LayerNode.compile(
+      LayerNode.group([
+        Agent.node,
+        Config.node,
+        FSUtil.node,
+        CrossSpawnSpawner.node,
+        Instruction.node,
+        LSP.node,
+        Ripgrep.node,
+        Truncate.node,
+      ]),
+    ),
+    testInstanceStoreLayer,
+  ),
+)
+
 const init = Effect.fn("ReadToolTest.init")(function* () {
   const info = yield* ReadTool
   return yield* info.init()
@@ -598,6 +617,35 @@ describe("tool.read loaded instructions", () => {
 
       const build = yield* exec(dir, { filePath: file }, { ...ctx, agent: "build", messageID: MessageID.make("msg_b") })
       expect(build.metadata.loaded).toContain(path.join(dir, "subdir", "AGENTS.md"))
+    }),
+  )
+})
+
+describe("tool.read instruction file cap", () => {
+  itWithConfig.live("cuts a large nested instruction file to tool_output.max_instruction_bytes", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ config: { tool_output: { max_instruction_bytes: 2_000 } } })
+      const big = Array.from({ length: 5_000 }, (_, i) => `- rule ${i}`).join("\n")
+      yield* put(path.join(dir, "subdir", "AGENTS.md"), big)
+      yield* put(path.join(dir, "subdir", "nested", "test.txt"), "test content")
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "subdir", "nested", "test.txt") })
+      expect(result.output).toContain("test content")
+      expect(result.output).toContain("- rule 0")
+      expect(result.output).not.toContain("- rule 4999")
+      expect(result.output).toContain("Instruction file cut")
+      expect(Buffer.byteLength(result.output)).toBeLessThan(4_000)
+    }),
+  )
+
+  it.live("keeps a large instruction file whole when no cap is configured", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const big = Array.from({ length: 5_000 }, (_, i) => `- rule ${i}`).join("\n")
+      yield* put(path.join(dir, "subdir", "AGENTS.md"), big)
+      yield* put(path.join(dir, "subdir", "nested", "test.txt"), "test content")
+      const result = yield* exec(dir, { filePath: path.join(dir, "subdir", "nested", "test.txt") })
+      expect(result.output).toContain("- rule 4999")
     }),
   )
 })

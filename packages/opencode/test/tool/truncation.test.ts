@@ -147,6 +147,32 @@ describe("Truncate", () => {
         }),
       )
 
+      const headTailIt = configuredIt({ tool_output: { max_lines: 20, max_bytes: 1024 * 1024, preview: "head_tail" } })
+      headTailIt.live("preview head_tail shows both ends with counts and the saved path", () =>
+        Effect.gen(function* () {
+          const content = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
+          const result = yield* (yield* Truncate.Service).output(content)
+          expect(result.truncated).toBe(true)
+          expect(result.content.startsWith("line0\n")).toBe(true)
+          expect(result.content.endsWith("line99")).toBe(true)
+          expect(result.content).toContain("...80 lines")
+          expect(result.content).toContain("of 100 lines")
+          if (result.truncated) expect(result.content).toContain(result.outputPath)
+          const limits = yield* (yield* Truncate.Service).limits()
+          expect(limits.preview).toBe("head_tail")
+        }),
+      )
+
+      const defaultPreviewIt = configuredIt({ tool_output: { max_lines: 10, max_bytes: 1024 * 1024 } })
+      defaultPreviewIt.live("without preview set, limits keep the head default and no extra caps", () =>
+        Effect.gen(function* () {
+          const limits = yield* (yield* Truncate.Service).limits()
+          expect(limits.preview).toBe("head")
+          expect(limits.maxAttachments).toBeUndefined()
+          expect(limits.maxInstructionBytes).toBeUndefined()
+        }),
+      )
+
       const overrideIt = configuredIt({ tool_output: { max_lines: 10, max_bytes: 100 } })
       overrideIt.live("per-call options still override config", () =>
         Effect.gen(function* () {
