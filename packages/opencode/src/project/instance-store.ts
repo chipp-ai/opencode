@@ -29,6 +29,10 @@ export interface Interface {
   readonly dispose: (ctx: InstanceContext) => Effect.Effect<void>
   readonly disposeDirectory: (directory: string) => Effect.Effect<void>
   readonly disposeAll: () => Effect.Effect<void>
+  /** True while an instance for `directory` is cached, loaded or still loading. Never loads one. */
+  readonly has: (directory: string) => Effect.Effect<boolean>
+  /** Every directory with a cached instance, loaded or still loading. Never loads one. */
+  readonly directories: () => Effect.Effect<string[]>
   /** Runs `effect` against the instance, holding a lease on it for the duration. */
   readonly provide: <A, E, R>(input: LoadInput, effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
 }
@@ -253,6 +257,10 @@ const layer: Layer.Layer<Service, never, Requirements> = Layer.effect(
       )
     }
 
+    const has = (directory: string) => Effect.sync(() => cache.has(FSUtil.resolve(directory)))
+
+    const directories = () => Effect.sync(() => [...cache.keys()])
+
     yield* Effect.addFinalizer(() => disposeAll().pipe(Effect.ignore))
 
     return Service.of({
@@ -262,6 +270,8 @@ const layer: Layer.Layer<Service, never, Requirements> = Layer.effect(
       dispose,
       disposeDirectory,
       disposeAll,
+      has,
+      directories,
       provide,
     })
   }),

@@ -198,6 +198,30 @@ describe("InstanceStore", () => {
     }),
   )
 
+  it.live("has and directories report cached instances without loading one", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const store = yield* InstanceStore.Service
+      const initialized = { count: 0 }
+      yield* setBootstrap(
+        Effect.sync(() => {
+          initialized.count++
+        }),
+      )
+
+      expect(yield* store.has(dir)).toBe(false)
+      expect(yield* store.directories()).not.toContain(dir)
+      expect(initialized.count).toBe(0)
+      const ctx = yield* store.load({ directory: dir })
+      expect(yield* store.has(dir)).toBe(true)
+      expect(yield* store.directories()).toContain(ctx.directory)
+      yield* store.disposeDirectory(dir)
+      expect(yield* store.has(dir)).toBe(false)
+      expect(yield* store.directories()).not.toContain(ctx.directory)
+      expect(initialized.count).toBe(1)
+    }),
+  )
+
   it.live("dedupes concurrent disposeAll calls", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped({ git: true })
