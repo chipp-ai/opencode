@@ -4,7 +4,35 @@ This is [chipp-ai/opencode](https://github.com/chipp-ai/opencode), a public fork
 
 Each entry names the upstream gap it addresses, whether it originated as our own work or was adapted from an abandoned community attempt upstream, and where to look for the actual commits.
 
+## Pulling upstream fixes
+
+This fork is not rebased onto upstream wholesale. The 2026-11-13 review ([specs/upstream-sync-2026-11-13.md](specs/upstream-sync-2026-11-13.md)) found the upstream branch past our base carries the V2 cutover, package renames, a tool/plugin redesign and newer Effect APIs, so a merge that resolves text conflicts is not evidence that the result runs. Rechecked 2026-11-21: our merge base with upstream `dev` is still `2406400f0a` (just after `v1.18.32`), with 7,325 upstream commits since. Until a deliberate re-base project, upstream fixes come in selectively:
+
+1. `git fetch origin dev` (`origin` is upstream). List candidates with `git log --oneline $(git merge-base origin/dev chipp-ai/dev)..origin/dev -- <paths>` for the areas you care about, or from upstream's merged PRs.
+2. For each fix, check whether the code it touches exists here in the same shape. If it does, cherry-pick with `-x`; if not, adapt it and say so in the commit body with the upstream sha and PR number. Never pull dependency, package-scope or SDK changes in as incidental cleanup.
+3. Write a test that fails on our current code and passes with the fix. Run targeted tests and `bun typecheck` from the package directories with the pinned Bun (`packageManager` in `package.json`).
+4. Record each batch here (upstream sha compared, what was taken, what was deferred and why), one commit per fix, conventional commit messages.
+5. Downstream builds (see "Build-time embedding for downstream products" below) pick fixes up by building from a new `v1.18.32-chipp.N` tag. Tag only from `dev`, after the batch is pushed.
+
+A full re-base onto upstream is its own project: diff behavior and stored data for every fork feature listed in this file, and keep the embedding seams' contracts (`Embed`, `EventV2.Deliver`, `EventV2.Persist`, `RouteExtension`, command-id admission) since a downstream plugin is compiled against them.
+
 ## Implemented
+
+### Build-time embedding for downstream products, and the generic fixes from the retired private sibling fork (2026-11-21)
+
+The private sibling fork (`BenchmarkAI/opencode`, branch `chipp/persistent-runtime`) is retired. Its product-specific runtime code (an authenticated `/chipp/*` route group, a durable-event bridge to a host, gateway credential headers, command admission) now lives in a private plugin in the downstream product's own repository, compiled into that product's binary through the seams below. Everything generic it carried landed here as separate commits. Nothing product-specific is in this repository.
+
+- **Idempotent prompt admission by external command id (`a3b729f543`):** `SessionInput.admit` takes optional `commandId` and `inputFingerprint`. A retry with the same command id resolves to the input already admitted under it, whatever message id it carries; a different fingerprint dies with `SessionInput.CommandConflict`; a concurrent duplicate that loses the new unique `(session_id, command_id)` index resolves to the stored row. Both fields travel on `session.next.prompt.admitted`, so replay and import restore the mapping. Migration `20261121144759_session_input_command`. A data directory created by the retired fork already has these columns from its own migration and is not upgraded in place; the fork's sandboxes never reopen their data directory with a different binary, so this was left unhandled.
+- **`EventV2.Deliver` (`ae65491b41`):** an effectful hook after each locally published durable event commits and before `publish` returns, with id, aggregate, sequence, versioned type, stored payload and the original event. Its failure propagates to the publisher; replayed events skip it; it may use the event log's database (for a delivery cursor). This is the explicit delivery interface the 2026-11-13 review said `EventV2.Persist` cannot be.
+- **`Embed.register` (`ab4885a63b`):** a downstream entrypoint registers `{ name, routeExtensions, persist, deliver, plugins }` before importing the CLI. `Server.listen` mounts the routes and supplies persist/deliver; the plugin service loads the plugins after the internal ones, and a failed embedded plugin fails the instance rather than being skipped. `HttpApiApp.workspaceRoutingLive` is exported so an extension whose groups declare the instance middlewares reuses the built-in ones.
+- **Build options (`9c4265cbf1`):** `script/build.ts --target=<os-arch[-abi][-baseline]>` (one named target, including a cross-compile), `--entry=<path>` (compile a downstream entrypoint as the main module), and a refusal to compile with a Bun other than the `packageManager` pin unless `OPENCODE_ALLOW_BUN_MISMATCH=1` (a 1.4.2 build of 1.3.14-pinned source crashed on every prompt).
+- **`doom_loop` deny fails only the repeated call (`5b9e9932c2`):** a configured deny used to end the whole turn as an unknown error; now the third identical call fails with guidance and the turn continues. A person's reject still ends the turn. V2 has no doom-loop check.
+- **LSP dispose and report (`6abf330a7b`):** `LSP.Service.dispose()` shuts down every language server under a loaded instance with its process tree, keeps the instance, and returns per-client survivors; `report()` lists running servers with pid, busy, idle time and children. `IdleLease.Tracker.idleFor`.
+- **`InstanceStore.has` / `directories` (`6d3e10cbf0`)** read-only probes that never load an instance, and **`Session.Service.create({ id })` (`3791aa17ba`)** for binding state to a session id before its first durable event commits.
+- **Half-close coverage (`83f3e8d60b`):** tests that a keep-alive connection closes when the peer half-closes and that a prompt request mid-stream is torn down. The `Bun.serve` transport already behaved correctly.
+- **Already here, nothing ported:** process-tree pid guards and read-before-signal; instance idle eviction primitives.
+- **Verified:** Bun 1.3.14. `bun typecheck` clean in `core`, `opencode`, `schema`. `packages/core`: event, session-input-command, session-projector, session and util suites 441 pass. `packages/opencode`: server, lsp, project, plugin, processor-effect, session and tool/lsp 722 pass, 1 fail (`httpapi-provider` model picker, which fails identically on unmodified `dev`). The downstream plugin's 227 tests and a scripted end-to-end run against a fake host and gateway passed on this tree; a session exported by the retired fork imported into the new build unchanged.
+- **Where:** [`dev` branch history](https://github.com/chipp-ai/opencode/commits/dev), commits `a3b729f543` through `83f3e8d60b`, first tagged `v1.18.32-chipp.9`.
 
 ### Selective upstream hardening (2026-11-13)
 
