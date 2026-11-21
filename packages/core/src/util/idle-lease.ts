@@ -36,6 +36,13 @@ export class Tracker<K> {
     this.#entry(key, now).lastActivityAt = now
   }
 
+  /** Time since the last activity on `key` at `now`, or undefined when it is untracked. */
+  idleFor(key: K, now: number) {
+    const entry = this.#entries.get(key)
+    if (!entry) return undefined
+    return now - entry.lastActivityAt
+  }
+
   holders(key: K) {
     return this.#entries.get(key)?.holders ?? 0
   }

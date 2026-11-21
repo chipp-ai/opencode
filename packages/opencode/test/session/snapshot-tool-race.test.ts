@@ -74,6 +74,8 @@ const lsp = Layer.succeed(
     prepareCallHierarchy: () => Effect.succeed([]),
     incomingCalls: () => Effect.succeed([]),
     outgoingCalls: () => Effect.succeed([]),
+    dispose: () => Effect.succeed([]),
+    report: () => Effect.succeed({ probe: "ps" as const, clients: [] }),
   }),
 )
 

@@ -655,7 +655,7 @@ export async function create(input: {
       connection.end()
       connection.dispose()
       await Process.stop(input.server.process)
-      await ProcessTree.killTree(input.server.process.pid, { rows })
+      return ProcessTree.killTree(input.server.process.pid, { rows })
     },
   }
 

@@ -19,6 +19,8 @@ const IDLE_MS = 300
 const it = testEffect(
   LayerNode.compile(LSP.node, [[RuntimeFlags.node, RuntimeFlags.layer({ lspIdleTimeoutMs: IDLE_MS })]]),
 )
+// The default idle window, so no sweep races an explicit dispose or report.
+const itNoIdle = testEffect(LayerNode.compile(LSP.node, [[RuntimeFlags.node, RuntimeFlags.layer({})]]))
 
 const treeConfig = {
   git: true,
@@ -117,6 +119,54 @@ describe.skipIf(process.platform === "win32")("LSP process lifecycle", () => {
         )
         expect(ProcessTree.isAlive(started.server)).toBe(true)
         expect(ProcessTree.isAlive(started.grandchild)).toBe(true)
+      }),
+    treeConfig,
+    30_000,
+  )
+
+  itNoIdle.instance(
+    "dispose shuts down every server with its tree and keeps the instance answering",
+    () =>
+      Effect.gen(function* () {
+        const started = yield* startServer
+
+        const disposed = yield* started.lsp.dispose()
+
+        expect(disposed).toHaveLength(1)
+        expect(disposed[0].serverID).toBe("tree")
+        expect(disposed[0].pid).toBe(started.server)
+        expect(disposed[0].treeKnown).toBe(true)
+        expect(disposed[0].targets).toContain(started.grandchild)
+        expect(disposed[0].survivors).toEqual([])
+        expect(ProcessTree.isAlive(started.server)).toBe(false)
+        expect(ProcessTree.isAlive(started.grandchild)).toBe(false)
+        expect(yield* started.lsp.status()).toEqual([])
+        expect(yield* started.lsp.dispose()).toEqual([])
+
+        const again = yield* startServer
+        expect(again.server).not.toBe(started.server)
+        expect(ProcessTree.isAlive(again.server)).toBe(true)
+      }),
+    treeConfig,
+    30_000,
+  )
+
+  itNoIdle.instance(
+    "report lists each running server with its pid, idle time and child processes",
+    () =>
+      Effect.gen(function* () {
+        const started = yield* startServer
+
+        const report = yield* started.lsp.report()
+
+        expect(report.probe).toBe("ps")
+        expect(report.clients).toHaveLength(1)
+        expect(report.clients[0].serverID).toBe("tree")
+        expect(report.clients[0].pid).toBe(started.server)
+        expect(report.clients[0].busy).toBe(false)
+        expect(report.clients[0].idleMs).toBeGreaterThanOrEqual(0)
+        expect(report.clients[0].children.map((child) => child.pid)).toContain(started.grandchild)
+        yield* started.lsp.dispose()
       }),
     treeConfig,
     30_000,

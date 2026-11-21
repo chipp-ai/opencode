@@ -11,6 +11,7 @@ import { spawn as lspspawn } from "./launch"
 import { Clock, Duration, Effect, Layer, Context, Schedule, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { IdleLease } from "@opencode-ai/core/util/idle-lease"
+import { ProcessTree } from "@opencode-ai/core/util/process-tree"
 import { containsPath } from "@/project/instance-context"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -55,6 +56,39 @@ export const Status = Schema.Struct({
   status: Schema.Literals(["connected", "error"]),
 }).annotate({ identifier: "LSPStatus" })
 export type Status = typeof Status.Type
+
+// One client shut down by `dispose` or the idle sweep. `targets` and `survivors` cover the
+// server's whole process tree; non-empty `survivors` means the shutdown is unconfirmed.
+export const Disposed = Schema.Struct({
+  serverID: Schema.String,
+  root: Schema.String,
+  pid: Schema.optional(Schema.Number),
+  targets: Schema.Array(Schema.Number),
+  survivors: Schema.Array(Schema.Number),
+  treeKnown: Schema.Boolean,
+}).annotate({ identifier: "LSPDisposed" })
+export type Disposed = typeof Disposed.Type
+
+export const ReportClient = Schema.Struct({
+  serverID: Schema.String,
+  root: Schema.String,
+  pid: Schema.optional(Schema.Number),
+  /** True while a request holds the client, which keeps the idle sweep away from it. */
+  busy: Schema.Boolean,
+  /** Time since the client last served a request. */
+  idleMs: Schema.optional(Schema.Number),
+  /** Live descendants of the server process, command name only. */
+  children: Schema.Array(Schema.Struct({ pid: Schema.Number, comm: Schema.String })),
+}).annotate({ identifier: "LSPReportClient" })
+export type ReportClient = typeof ReportClient.Type
+
+export const Report = Schema.Struct({
+  // "unavailable" when the process table could not be read: clients keep their pid but
+  // list no children, which means unknown rather than none.
+  probe: Schema.Literals(["ps", "unavailable"]),
+  clients: Schema.Array(ReportClient),
+}).annotate({ identifier: "LSPReport" })
+export type Report = typeof Report.Type
 
 enum SymbolKind {
   File = 1,
@@ -138,6 +172,11 @@ export interface Interface {
   readonly prepareCallHierarchy: (input: LocInput) => Effect.Effect<any[]>
   readonly incomingCalls: (input: LocInput) => Effect.Effect<any[]>
   readonly outgoingCalls: (input: LocInput) => Effect.Effect<any[]>
+  /** Shut down every language server of this instance, in-flight spawns included, and
+   *  leave the instance loaded. The next request that needs a server spawns it again. */
+  readonly dispose: () => Effect.Effect<Disposed[]>
+  /** Read-only view of the running language servers and their process trees. */
+  readonly report: () => Effect.Effect<Report>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/LSP") {}
@@ -215,13 +254,10 @@ const layer = Layer.effect(
           const now = yield* Clock.currentTimeMillis
           const idle = s.usage.idle(idleMs, now)
           if (idle.length === 0) return
-          s.clients = s.clients.filter((client) => !idle.includes(client))
-          idle.forEach((client) => s.usage.forget(client, now))
           yield* Effect.logInfo("shutting down idle LSP clients", {
             clients: idle.map((client) => `${client.serverID}:${client.root}`).join(", "),
           })
-          yield* Effect.promise(() => Promise.all(idle.map((client) => client.shutdown())))
-          yield* events.publish(Event.Updated, {})
+          yield* retire(s, idle, now)
         }).pipe(
           Effect.catchCause((cause) => Effect.logWarning("LSP idle sweep failed", { cause })),
           Effect.repeat(Schedule.spaced(interval)),
@@ -232,6 +268,35 @@ const layer = Layer.effect(
         return s
       }),
     )
+
+    // Removes `clients` from the instance, then shuts each one down with its process tree.
+    const retire = Effect.fnUntraced(function* (s: State, clients: LSPClient.Info[], now: number) {
+      if (clients.length === 0) return [] as Disposed[]
+      s.clients = s.clients.filter((client) => !clients.includes(client))
+      clients.forEach((client) => s.usage.forget(client, now))
+      const results = yield* Effect.promise(() =>
+        Promise.all(
+          clients.map(async (client): Promise<Disposed> => {
+            const killed = await client.shutdown()
+            return {
+              serverID: client.serverID,
+              root: client.root,
+              pid: client.pid,
+              targets: killed.targets,
+              survivors: killed.survivors,
+              treeKnown: killed.treeKnown,
+            }
+          }),
+        ),
+      )
+      const survivors = results.filter((result) => result.survivors.length > 0)
+      if (survivors.length > 0)
+        yield* Effect.logWarning("LSP processes survived shutdown", {
+          survivors: survivors.map((result) => `${result.serverID}:${result.survivors.join(",")}`).join(", "),
+        })
+      yield* events.publish(Event.Updated, {})
+      return results
+    })
 
     const getClients = Effect.fnUntraced(function* (file: string) {
       const ctx = yield* InstanceState.context
@@ -354,6 +419,33 @@ const layer = Layer.effect(
         clients,
         Effect.promise(() => Promise.all(clients.map((x) => fn(x)))),
       )
+    })
+
+    const dispose = Effect.fn("LSP.dispose")(function* () {
+      const s = yield* InstanceState.get(state)
+      // A spawn in flight adds its client when it settles, so wait for those first.
+      yield* Effect.promise(() => Promise.all(s.spawning.values()))
+      return yield* retire(s, [...s.clients], yield* Clock.currentTimeMillis)
+    })
+
+    const report = Effect.fn("LSP.report")(function* () {
+      const s = yield* InstanceState.get(state)
+      const now = yield* Clock.currentTimeMillis
+      const rows = yield* Effect.promise(() => ProcessTree.table())
+      return {
+        probe: rows ? "ps" : "unavailable",
+        clients: s.clients.map((client) => ({
+          serverID: client.serverID,
+          root: client.root,
+          pid: client.pid,
+          busy: s.usage.holders(client) > 0,
+          idleMs: s.usage.idleFor(client, now),
+          children:
+            client.pid === undefined || !rows
+              ? []
+              : ProcessTree.descendants(client.pid, rows).map((row) => ({ pid: row.pid, comm: row.comm })),
+        })),
+      } satisfies Report
     })
 
     const init = Effect.fn("LSP.init")(function* () {
@@ -545,6 +637,8 @@ const layer = Layer.effect(
       prepareCallHierarchy,
       incomingCalls,
       outgoingCalls,
+      dispose,
+      report,
     })
   }),
 )

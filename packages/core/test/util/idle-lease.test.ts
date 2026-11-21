@@ -66,4 +66,14 @@ describe("IdleLease.Tracker", () => {
     stale(3)
     expect(leases.holders("/repo")).toBe(1)
   })
+
+  test("idleFor reports time since the last activity and nothing for an untracked key", () => {
+    const leases = new IdleLease.Tracker<string>()
+    expect(leases.idleFor("/repo", 0)).toBeUndefined()
+    leases.touch("/repo", 100)
+    expect(leases.idleFor("/repo", 350)).toBe(250)
+    const release = leases.acquire("/repo", 400)
+    release(500)
+    expect(leases.idleFor("/repo", 600)).toBe(100)
+  })
 })
