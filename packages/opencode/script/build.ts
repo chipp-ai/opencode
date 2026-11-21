@@ -16,7 +16,24 @@ const generated = await import("./generate.ts")
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 
+// A binary compiled by a different Bun than the packageManager pin is not the binary the tests ran
+// against. One built by Bun 1.4.2 against the 1.3.14 pin crashed on every prompt while the same source
+// compiled by 1.3.14 ran clean, so a mismatch is refused unless explicitly allowed.
+const pinnedBun = (await Bun.file(path.join(dir, "../../package.json")).json()).packageManager?.replace(/^bun@/, "")
+if (pinnedBun && Bun.version !== pinnedBun && process.env.OPENCODE_ALLOW_BUN_MISMATCH !== "1") {
+  console.error(
+    `refusing to build: bun ${Bun.version} does not match the packageManager pin bun@${pinnedBun} (set OPENCODE_ALLOW_BUN_MISMATCH=1 to override)`,
+  )
+  process.exit(2)
+}
+
 const singleFlag = process.argv.includes("--single")
+// `--target=linux-x64` builds exactly one named target (os-arch[-abi][-baseline]), e.g. to cross-compile
+// a release binary from another platform, which `--single` cannot do.
+const targetFlag = process.argv.find((arg) => arg.startsWith("--target="))?.slice("--target=".length)
+// `--entry=path` compiles a downstream entrypoint as the binary's main module instead of ./src/index.ts.
+// It must import ./src/index.ts itself, typically after registering an `Embed` contribution.
+const entryFlag = process.argv.find((arg) => arg.startsWith("--entry="))?.slice("--entry=".length)
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
@@ -113,26 +130,36 @@ const allTargets: {
   },
 ]
 
-const targets = singleFlag
-  ? allTargets.filter((item) => {
-      if (item.os !== process.platform || item.arch !== process.arch) {
-        return false
-      }
+const targetName = (item: (typeof allTargets)[number]) =>
+  [item.os, item.arch, item.abi, item.avx2 === false ? "baseline" : undefined].filter(Boolean).join("-")
 
-      // When building for the current platform, prefer a single native binary by default.
-      // Baseline binaries require additional Bun artifacts and can be flaky to download.
-      if (item.avx2 === false) {
-        return baselineFlag
-      }
+const targets = targetFlag
+  ? allTargets.filter((item) => targetName(item) === targetFlag)
+  : singleFlag
+    ? allTargets.filter((item) => {
+        if (item.os !== process.platform || item.arch !== process.arch) {
+          return false
+        }
 
-      // also skip abi-specific builds for the same reason
-      if (item.abi !== undefined) {
-        return false
-      }
+        // When building for the current platform, prefer a single native binary by default.
+        // Baseline binaries require additional Bun artifacts and can be flaky to download.
+        if (item.avx2 === false) {
+          return baselineFlag
+        }
 
-      return true
-    })
-  : allTargets
+        // also skip abi-specific builds for the same reason
+        if (item.abi !== undefined) {
+          return false
+        }
+
+        return true
+      })
+    : allTargets
+
+if (targets.length === 0) {
+  console.error(`no build target matches ${targetFlag}; known: ${allTargets.map(targetName).join(", ")}`)
+  process.exit(2)
+}
 
 await $`rm -rf dist`
 
@@ -184,7 +211,7 @@ for (const item of targets) {
       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
     },
     entrypoints: [
-      "./src/index.ts",
+      entryFlag ?? "./src/index.ts",
       workerPath,
       treeSitterWorkerPath,
       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
