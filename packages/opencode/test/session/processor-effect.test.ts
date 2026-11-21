@@ -226,6 +226,33 @@ const fragmentFailureLLM = Layer.succeed(
 const fragmentFailureEnv = LayerNode.compile(root, [...replacements, [LLM.node, fragmentFailureLLM]])
 const itFragmentFailure = testEffect(fragmentFailureEnv)
 
+// The same tool call three times in a row trips the doom-loop check.
+function repeatedCall(n: number) {
+  const id = `call-${n}`
+  return [
+    LLMEvent.toolInputStart({ id, name: "lookup" }),
+    LLMEvent.toolInputEnd({ id, name: "lookup" }),
+    LLMEvent.toolCall({ id, name: "lookup", input: { query: "ci" }, providerExecuted: true }),
+    LLMEvent.toolResult({ id, name: "lookup", result: { type: "text", value: "still running" }, providerExecuted: true }),
+  ]
+}
+const doomLoopLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        ...repeatedCall(1),
+        ...repeatedCall(2),
+        ...repeatedCall(3),
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+        LLMEvent.finish({ reason: "tool-calls" }),
+      ),
+  }),
+)
+const doomLoopEnv = LayerNode.compile(root, [...replacements, [LLM.node, doomLoopLLM]])
+const itDoomLoop = testEffect(doomLoopEnv)
+
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
   const session = yield* Session.Service
@@ -1167,5 +1194,47 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
         expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
       }),
     { config: cfg },
+  ),
+)
+
+itDoomLoop.live("session.processor effect tests fail only the repeated call when doom_loop is denied", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "poll ci")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "poll ci" }],
+          tools: {},
+        })
+
+        const parts = (yield* MessageV2.parts(msg.id)).filter(
+          (part): part is SessionV1.ToolPart => part.type === "tool",
+        )
+        expect(parts.map((part) => part.state.status)).toEqual(["completed", "completed", "error"])
+        const third = parts[2]
+        if (third.state.status === "error") expect(third.state.error).toContain("identical arguments")
+        // The turn is not ended by the denial: no message error, and the loop may continue.
+        expect(handle.message.error).toBeUndefined()
+        expect(value).not.toBe("stop")
+      }),
+    { config: { ...cfg, permission: { doom_loop: "deny" } } },
   ),
 )

@@ -27,6 +27,10 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
+const DOOM_LOOP_DENIED_GUIDANCE =
+  `You made the same tool call with identical arguments ${DOOM_LOOP_THRESHOLD} times in a row, so this call ` +
+  "was not run. Stop repeating it and change approach: use different arguments, a different tool, or report " +
+  "your current state. If you are polling something that is still running, do not poll it again."
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -369,14 +373,26 @@ const layer = Layer.effect(
             }
 
             const agent = yield* agents.get(ctx.assistantMessage.agent)
-            yield* permission.ask({
-              permission: "doom_loop",
-              patterns: [value.name],
-              sessionID: ctx.assistantMessage.sessionID,
-              metadata: { tool: value.name, input },
-              always: [value.name],
-              ruleset: agent.permission,
-            })
+            const denied = yield* permission
+              .ask({
+                permission: "doom_loop",
+                patterns: [value.name],
+                sessionID: ctx.assistantMessage.sessionID,
+                metadata: { tool: value.name, input },
+                always: [value.name],
+                ruleset: agent.permission,
+              })
+              .pipe(
+                Effect.as(false),
+                Effect.catchIf(
+                  (error) => error instanceof PermissionV1.DeniedError,
+                  () => Effect.succeed(true),
+                ),
+              )
+            // A configured deny (for example a headless run where nobody can answer `ask`) fails
+            // only this call, as an ordinary tool error the model reads on its next step. A
+            // person's reject is RejectedError and still ends the turn.
+            if (denied) yield* failToolCall(value.id, new Error(DOOM_LOOP_DENIED_GUIDANCE))
             return
           }
 
