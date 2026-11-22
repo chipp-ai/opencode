@@ -18,6 +18,15 @@ A full re-base onto upstream is its own project: diff behavior and stored data f
 
 ## Implemented
 
+### Opt-in tool-output caps and compaction loop guards (2026-11-21, 2026-11-22)
+
+Production sessions on a downstream build hit two failure shapes. Single tool results were hundreds of KB: a read with a 185 KB nested `CLAUDE.md` appended came to 240 KB, and a grep came to 143 KB. And automatic compaction looped: the trigger sat below the size a compacted session starts at, which gave 150 compactions in 45 minutes. Every setting below is opt-in, so with none set, behavior is the same as before.
+
+- **Tool output (`f5f197dcae`, `30f2920df0`):** `tool_output.preview: "head_tail"` shows the first and last parts of a truncated result, with omitted line and byte counts and the saved path to grep or page. `tool_output.max_attachments` keeps at most N attachments from one result and says how many were dropped. `tool_output.max_instruction_bytes` cuts each nested `AGENTS.md`/`CLAUDE.md` that read appends after its own 50 KB cap. With `tool_output.max_bytes` or `max_lines` set, grep and glob output over the cap is capped again (the wrapper used to skip any tool that set `metadata.truncated` itself, and grep limits matches, not bytes). Read pages at the configured byte cap, so its offset hints stay exact.
+- **Compaction (`978fab2532`):** `compaction.threshold` starts automatic compaction at a fraction of the usable window (for example 0.8), not only when the window is full. `compaction.min_steps_between` requires that many finished steps since the previous compaction. `compaction.floor_margin` refuses automatic compaction when the first step after a compaction already reads at least trigger x (1 - margin), because compacting again cannot make room. A refused compaction never compacts: the session goes on and, at the real limit, stops with `ContextOverflowError`, the same as with `auto: false`. A test reproduces the production loop and shows the guards stop it.
+- **Verified:** typecheck clean, tool and session suites green (821 tests at `30f2920df0`). On a downstream build at `v1.18.32-chipp.9`, four real-session replays finished their builds with no automatic-compaction loop (the original sessions looped 194 and 321 times) and no tool result over 55 KB.
+- **Where:** [`dev` branch history](https://github.com/chipp-ai/opencode/commits/dev), commits `f5f197dcae`, `978fab2532` (in `v1.18.32-chipp.9`) and `30f2920df0` (first in `v1.18.32-chipp.10`).
+
 ### Build-time embedding for downstream products, and the generic fixes from the retired private sibling fork (2026-11-21)
 
 The private sibling fork (`BenchmarkAI/opencode`, branch `chipp/persistent-runtime`) is retired. Its product-specific runtime code (an authenticated `/chipp/*` route group, a durable-event bridge to a host, gateway credential headers, command admission) now lives in a private plugin in the downstream product's own repository, compiled into that product's binary through the seams below. Everything generic it carried landed here as separate commits. Nothing product-specific is in this repository.
