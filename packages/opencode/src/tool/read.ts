@@ -138,7 +138,10 @@ export const ReadTool = Tool.define<
       )
     })
 
-    const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
+    const lines = Effect.fn("ReadTool.lines")(function* (
+      filepath: string,
+      opts: { limit: number; offset: number; maxBytes: number },
+    ) {
       const start = opts.offset - 1
       const raw: string[] = []
       const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
@@ -165,7 +168,7 @@ export const ReadTool = Tool.define<
 
             const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
             const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
-            if (flags.bytes + size <= MAX_BYTES) {
+            if (flags.bytes + size <= opts.maxBytes) {
               raw.push(line)
               flags.bytes += size
               return
@@ -334,7 +337,15 @@ export const ReadTool = Tool.define<
         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
       }
 
-      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+      // A configured tool_output.max_bytes below the read page cap is the page
+      // size, so pages and their offset hints stay exact.
+      const limits = yield* truncate.limits()
+      const pageBytes = limits.configured ? Math.min(MAX_BYTES, limits.maxBytes) : MAX_BYTES
+      const file = yield* lines(filepath, {
+        limit: params.limit ?? DEFAULT_READ_LIMIT,
+        offset: params.offset || 1,
+        maxBytes: pageBytes,
+      })
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
@@ -348,7 +359,7 @@ export const ReadTool = Tool.define<
       const next = last + 1
       const truncated = file.more || file.cut
       if (file.cut) {
-        output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
+        output += `\n\n(Output capped at ${pageBytes === MAX_BYTES ? MAX_BYTES_LABEL : `${Math.round(pageBytes / 1024)} KB`}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
       } else if (file.more) {
         output += `\n\n(Showing lines ${file.offset}-${last} of ${file.count}. Use offset=${next} to continue.)`
       } else {

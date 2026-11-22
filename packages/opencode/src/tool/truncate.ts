@@ -33,6 +33,8 @@ export interface Limits {
   maxAttachments?: number
   /** `tool_output.max_instruction_bytes`; undefined means no limit. */
   maxInstructionBytes?: number
+  /** True when `tool_output.max_bytes` or `max_lines` is set: the cap then applies to every tool. */
+  configured?: boolean
 }
 
 function take(lines: string[], maxLines: number, maxBytes: number, fromEnd: boolean) {
@@ -161,6 +163,7 @@ const layer = Layer.effect(
         preview: cfg?.tool_output?.preview ?? "head",
         maxAttachments: cfg?.tool_output?.max_attachments,
         maxInstructionBytes: cfg?.tool_output?.max_instruction_bytes,
+        configured: cfg?.tool_output?.max_bytes !== undefined || cfg?.tool_output?.max_lines !== undefined,
       } satisfies Limits
     })
 

@@ -129,7 +129,20 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           )
           const result = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx)
           if (result.metadata.truncated !== undefined) {
-            return result
+            // A tool that limits itself (grep's match count, glob's file
+            // count) can still return more bytes than the configured cap:
+            // long match lines made a 143 KB grep result. With tool_output
+            // configured, cap it again. Read pages by the cap itself, so its
+            // offset hints stay exact; it is left as it is here.
+            if (id === "read") return result
+            if (!(yield* truncate.limits()).configured) return result
+            const capped = yield* truncate.output(result.output, {}, yield* agents.get(ctx.agent))
+            if (!capped.truncated) return result
+            return {
+              ...result,
+              output: capped.content,
+              metadata: { ...result.metadata, truncated: true, outputPath: capped.outputPath },
+            }
           }
           const agent = yield* agents.get(ctx.agent)
           const truncated = yield* truncate.output(result.output, {}, agent)
